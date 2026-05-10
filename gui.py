@@ -32,7 +32,7 @@ class YTDLPApp:
     def __init__(self, root):
         self.root = root
         self.root.title("yt-dlp Downloader")
-        self.root.geometry("850x700")
+        self.root.geometry("850x820")
 
         self.config = load_config()
         self.is_downloading = False
@@ -51,7 +51,7 @@ class YTDLPApp:
         self.build_downloads_tab()
 
     def build_settings_tab(self):
-        # yt-dlp Executable Path
+        # 1. yt-dlp Executable Path
         ttk.Label(self.tab_settings, text = "yt-dlp Executable:").grid(row = 0, column = 0,
                                                                        sticky = 'w', padx = 10,
                                                                        pady = (20, 5))
@@ -66,7 +66,7 @@ class YTDLPApp:
                    command = lambda: self.browse_file(self.path_ytdlp)).grid(row = 0, column = 2,
                                                                              pady = (20, 5))
 
-        # Output Directory
+        # 2. Output Directory
         ttk.Label(self.tab_settings, text = "Output Directory:").grid(row = 1, column = 0,
                                                                       sticky = 'w', padx = 10,
                                                                       pady = 5)
@@ -81,7 +81,7 @@ class YTDLPApp:
                    command = lambda: self.browse_dir(self.path_output)).grid(row = 1, column = 2,
                                                                              pady = 5)
 
-        # FFmpeg Directory
+        # 3. FFmpeg Directory
         ttk.Label(self.tab_settings, text = "FFmpeg Folder (Optional):").grid(row = 2, column = 0,
                                                                               sticky = 'w',
                                                                               padx = 10, pady = 5)
@@ -95,61 +95,130 @@ class YTDLPApp:
                    command = lambda: self.browse_dir(self.path_ffmpeg)).grid(row = 2, column = 2,
                                                                              pady = 5)
 
-        # Audio Codec
-        ttk.Label(self.tab_settings, text = "Preferred Audio Codec:").grid(row = 3, column = 0,
+        # 4. Download Type (Audio vs Video)
+        ttk.Label(self.tab_settings, text = "Download Type:").grid(row = 3, column = 0,
+                                                                   sticky = 'w', padx = 10,
+                                                                   pady = 5)
+        self.var_format_type = tk.StringVar(value = self.config.get('format_type', 'Audio'))
+        frame_type = ttk.Frame(self.tab_settings)
+        frame_type.grid(row = 3, column = 1, sticky = 'w', padx = 5, pady = 5)
+        ttk.Radiobutton(frame_type, text = "Audio", variable = self.var_format_type,
+                        value = "Audio", command = self.toggle_format_settings).pack(side = 'left',
+                                                                                     padx = (0, 15))
+        ttk.Radiobutton(frame_type, text = "Video", variable = self.var_format_type,
+                        value = "Video", command = self.toggle_format_settings).pack(side = 'left')
+
+        # 5. Audio Codec (Audio Only)
+        ttk.Label(self.tab_settings, text = "Preferred Audio Codec:").grid(row = 4, column = 0,
                                                                            sticky = 'w', padx = 10,
                                                                            pady = 5)
         self.var_audio_codec = tk.StringVar(value = self.config.get('audio_codec', 'opus'))
-        codecs = ['none (keep original)', 'mp3', 'm4a', 'opus', 'flac', 'vorbis', 'alac', 'mka', 'mp4']
-
+        codecs = ['none (keep original)', 'mp3', 'm4a', 'opus', 'flac', 'vorbis', 'alac', 'mka',
+                  'mp4']
         self.combo_codec = ttk.Combobox(self.tab_settings, textvariable = self.var_audio_codec,
-                                        values = codecs, state = 'readonly', width = 20)
-        self.combo_codec.grid(row = 3, column = 1, sticky = 'w', padx = 5, pady = 5)
+                                        values = codecs, state = 'readonly', width = 25)
+        self.combo_codec.grid(row = 4, column = 1, sticky = 'w', padx = 5, pady = 5)
         self.combo_codec.bind("<<ComboboxSelected>>", self.check_codec_warning)
 
-        # Warning Label for Codecs (Placed on a new row with columnspan=3 to prevent breaking the layout)
-        self.label_codec_warning = ttk.Label(self.tab_settings, text = "", foreground = "red")
-        self.label_codec_warning.grid(row = 4, column = 0, columnspan = 3, sticky = 'w', padx = 10,
-                                      pady = (0, 5))
-        self.check_codec_warning()  # Initialize warning state
+        # 6. Video Resolution
+        ttk.Label(self.tab_settings, text = "Max Video Resolution:").grid(row = 5, column = 0,
+                                                                          sticky = 'w', padx = 10,
+                                                                          pady = 5)
+        self.var_video_res = tk.StringVar(value = self.config.get('video_res', 'Best'))
+        resolutions = ['Best', '4320p', '2160p', '1440p', '1080p', '720p', '480p', '360p']
+        self.combo_video_res = ttk.Combobox(self.tab_settings, textvariable = self.var_video_res,
+                                            values = resolutions, state = 'readonly', width = 25)
+        self.combo_video_res.grid(row = 5, column = 1, sticky = 'w', padx = 5, pady = 5)
 
-        # Download Archive Toggle
+        # 7. Video Container Format
+        ttk.Label(self.tab_settings, text = "Video Format:").grid(row = 6, column = 0, sticky = 'w',
+                                                                  padx = 10, pady = 5)
+        self.var_video_ext = tk.StringVar(value = self.config.get('video_ext', 'mp4'))
+        self.combo_video_ext = ttk.Combobox(self.tab_settings, textvariable = self.var_video_ext,
+                                            values = ['mp4', 'mkv', 'webm'], state = 'readonly',
+                                            width = 25)
+        self.combo_video_ext.grid(row = 6, column = 1, sticky = 'w', padx = 5, pady = 5)
+        self.combo_video_ext.bind("<<ComboboxSelected>>", self.check_codec_warning)
+
+        # 8. Video Audio Preference
+        ttk.Label(self.tab_settings, text = "Video Audio Preference:").grid(row = 7, column = 0,
+                                                                            sticky = 'w', padx = 10,
+                                                                            pady = 5)
+        self.var_video_audio = tk.StringVar(
+            value = self.config.get('video_audio_pref', 'Best Audio (Default)'))
+        audio_prefs = ['Best Audio (Default)', 'Highly Compatible (AAC/M4A)']
+        self.combo_video_audio = ttk.Combobox(self.tab_settings,
+                                              textvariable = self.var_video_audio,
+                                              values = audio_prefs, state = 'readonly', width = 25)
+        self.combo_video_audio.grid(row = 7, column = 1, sticky = 'w', padx = 5, pady = 5)
+        self.combo_video_audio.bind("<<ComboboxSelected>>", self.check_codec_warning)
+
+        # Warning Label for Codecs/Formats
+        self.label_codec_warning = ttk.Label(self.tab_settings, text = "", foreground = "red",
+                                             justify = 'left')
+        self.label_codec_warning.grid(row = 8, column = 0, columnspan = 3, sticky = 'w', padx = 10,
+                                      pady = (0, 5))
+
+        # Initialize UI toggle states
+        self.toggle_format_settings()
+
+        # 9. Download Archive Toggle
         self.var_use_archive = tk.BooleanVar(value = self.config.get('use_archive', True))
         ttk.Checkbutton(self.tab_settings,
                         text = "Enable Download Archive (Skip already downloaded)",
-                        variable = self.var_use_archive).grid(row = 5, column = 1, sticky = 'w',
+                        variable = self.var_use_archive).grid(row = 9, column = 1, sticky = 'w',
                                                               padx = 5, pady = 5)
 
-        # Playlists Toggle
+        # 10. Playlists Toggle
         self.var_dl_playlists = tk.BooleanVar(value = self.config.get('download_playlists', True))
         ttk.Checkbutton(self.tab_settings, text = "Download Playlists",
                         variable = self.var_dl_playlists,
-                        command = self.toggle_playlist_limit).grid(row = 6, column = 1,
+                        command = self.toggle_playlist_limit).grid(row = 10, column = 1,
                                                                    sticky = 'w', padx = 5, pady = 5)
 
-        # Playlist Limit
-        ttk.Label(self.tab_settings, text = "Playlist Limit (0 = All):").grid(row = 7, column = 0,
+        # 11. Playlist Limit
+        ttk.Label(self.tab_settings, text = "Playlist Limit (0 = All):").grid(row = 11, column = 0,
                                                                               sticky = 'w',
                                                                               padx = 10, pady = 5)
         self.var_pl_limit = tk.StringVar(value = str(self.config.get('playlist_limit', 0)))
         self.entry_pl_limit = ttk.Entry(self.tab_settings, textvariable = self.var_pl_limit,
                                         width = 15)
-        self.entry_pl_limit.grid(row = 7, column = 1, sticky = 'w', padx = 5, pady = 5)
+        self.entry_pl_limit.grid(row = 11, column = 1, sticky = 'w', padx = 5, pady = 5)
         self.toggle_playlist_limit()
 
-        # Save Button
+        # 12. Save Button
         ttk.Button(self.tab_settings, text = "Save Configurations",
-                   command = lambda: self.save_settings(show_msg = True)).grid(row = 8, column = 1,
+                   command = lambda: self.save_settings(show_msg = True)).grid(row = 12, column = 1,
                                                                                pady = 30,
                                                                                sticky = 'e')
 
-    def check_codec_warning(self, event = None):
-        codec = self.var_audio_codec.get()
-        if codec == 'none (keep original)':
-            self.label_codec_warning.config(
-                text = "⚠️ Warning: WebM and some original formats often fail to embed thumbnails.")
+    def toggle_format_settings(self, event = None):
+        """Enables or disables combo boxes based on whether Audio or Video is selected"""
+        if self.var_format_type.get() == "Audio":
+            self.combo_codec.config(state = 'readonly')
+            self.combo_video_res.config(state = 'disabled')
+            self.combo_video_ext.config(state = 'disabled')
+            self.combo_video_audio.config(state = 'disabled')
         else:
-            self.label_codec_warning.config(text = "")
+            self.combo_codec.config(state = 'disabled')
+            self.combo_video_res.config(state = 'readonly')
+            self.combo_video_ext.config(state = 'readonly')
+            self.combo_video_audio.config(state = 'readonly')
+        self.check_codec_warning()
+
+    def check_codec_warning(self, event = None):
+        warnings = []
+        if self.var_format_type.get() == "Audio":
+            if self.var_audio_codec.get() == 'none (keep original)':
+                warnings.append("⚠️ WebM and some original formats often fail to embed thumbnails.")
+        else:
+            if self.var_video_ext.get() == 'webm':
+                warnings.append("⚠️ WebM container does not support embedded thumbnails.")
+            if self.var_video_audio.get() == 'Best Audio (Default)':
+                warnings.append(
+                    "ℹ️ 'Best Audio' may use Opus, which is unsupported on some devices/media players.\n.")
+
+        self.label_codec_warning.config(text = "\n".join(warnings))
 
     def toggle_playlist_limit(self):
         if self.var_dl_playlists.get():
@@ -164,7 +233,6 @@ class YTDLPApp:
 
         ttk.Label(frame_input, text = "Video URLs (one per line):").pack(anchor = 'w')
 
-        # Packing the button RIGHT first ensures it won't be pushed out on low window sizes
         btn_start = tk.Button(frame_input, text = "Queue &\nStart", bg = "#4CAF50", fg = "white",
                               font = ('Arial', 10, 'bold'), command = self.queue_urls)
         btn_start.pack(side = 'right', padx = (10, 0), fill = 'y', pady = 5)
@@ -176,14 +244,13 @@ class YTDLPApp:
         frame_queue = ttk.Frame(self.tab_downloads)
         frame_queue.pack(fill = 'both', expand = True, padx = 10, pady = 5)
 
-        # Queue Header with Remove Button
         frame_queue_header = ttk.Frame(frame_queue)
         frame_queue_header.pack(fill = 'x')
-        ttk.Label(frame_queue_header, text = "Queued URLs:").pack(side = 'left', anchor = 'w')
+        ttk.Label(frame_queue_header, text = "Queued URLs (Right-click to Copy):").pack(
+            side = 'left', anchor = 'w')
         ttk.Button(frame_queue_header, text = "Remove Selected",
                    command = self.remove_selected).pack(side = 'right')
 
-        # Treeview for columns
         frame_tree = ttk.Frame(frame_queue)
         frame_tree.pack(fill = 'both', expand = True, pady = (5, 0))
 
@@ -194,8 +261,18 @@ class YTDLPApp:
         self.queue_tree.column("url", width = 600)
         self.queue_tree.column("status", width = 120, anchor = 'center')
 
-        # Bind delete key to remove logic
+        # Bindings for Deleting & Copying
         self.queue_tree.bind("<Delete>", lambda e: self.remove_selected())
+        self.queue_tree.bind("<Control-c>", self.copy_urls)
+        self.queue_tree.bind("<Command-c>", self.copy_urls)  # For macOS
+
+        # Context Menu
+        self.queue_menu = tk.Menu(self.root, tearoff = 0)
+        self.queue_menu.add_command(label = "Copy URL(s)", command = self.copy_urls)
+        self.queue_menu.add_command(label = "Remove Selected", command = self.remove_selected)
+
+        self.queue_tree.bind("<Button-3>", self.show_context_menu)  # Windows/Linux Right Click
+        self.queue_tree.bind("<Button-2>", self.show_context_menu)  # MacOS Right Click
 
         scrollbar_queue = ttk.Scrollbar(frame_tree, orient = "vertical",
                                         command = self.queue_tree.yview)
@@ -204,7 +281,6 @@ class YTDLPApp:
         self.queue_tree.pack(side = 'left', fill = 'both', expand = True)
         scrollbar_queue.pack(side = 'right', fill = 'y')
 
-        # Progress Bar section
         self.progress_var = tk.DoubleVar()
         self.progress_bar = ttk.Progressbar(self.tab_downloads, variable = self.progress_var,
                                             maximum = 100)
@@ -240,7 +316,13 @@ class YTDLPApp:
         self.config['ytdlp_path'] = self.path_ytdlp.get()
         self.config['output_dir'] = self.path_output.get()
         self.config['ffmpeg_path'] = self.path_ffmpeg.get()
+
+        self.config['format_type'] = self.var_format_type.get()
         self.config['audio_codec'] = self.var_audio_codec.get()
+        self.config['video_res'] = self.var_video_res.get()
+        self.config['video_ext'] = self.var_video_ext.get()
+        self.config['video_audio_pref'] = self.var_video_audio.get()
+
         self.config['use_archive'] = self.var_use_archive.get()
         self.config['download_playlists'] = self.var_dl_playlists.get()
 
@@ -254,24 +336,37 @@ class YTDLPApp:
         if show_msg:
             messagebox.showinfo("Saved", "Configurations saved successfully!")
 
+    def show_context_menu(self, event):
+        item = self.queue_tree.identify_row(event.y)
+        if item:
+            # If the item under the mouse isn't selected, select it exclusively
+            if item not in self.queue_tree.selection():
+                self.queue_tree.selection_set(item)
+        self.queue_menu.tk_popup(event.x_root, event.y_root)
+
+    def copy_urls(self, event = None):
+        selected_items = self.queue_tree.selection()
+        urls = [self.queue_tree.item(item, "values")[0] for item in selected_items]
+
+        if urls:
+            self.root.clipboard_clear()
+            self.root.clipboard_append("\n".join(urls))
+            self.root.update()  # Keeps the clipboard populated after the function returns
+
     def log_output(self, text):
-        """Thread-safe way to update the command output textbox."""
         self.cmd_output.config(state = 'normal')
         self.cmd_output.insert(tk.END, text)
         self.cmd_output.see(tk.END)
         self.cmd_output.config(state = 'disabled')
 
     def update_tree_status(self, item_id, new_status):
-        """Thread-safe way to update the queue status."""
         current_values = self.queue_tree.item(item_id, "values")
         self.queue_tree.item(item_id, values = (current_values[0], new_status))
 
     def update_progress(self, percentage):
-        """Thread-safe way to update the progress bar."""
         self.progress_var.set(percentage)
 
     def remove_selected(self):
-        """Remove items from the queue (unless currently downloading)"""
         selected_items = self.queue_tree.selection()
         for item in selected_items:
             status = self.queue_tree.item(item, "values")[1]
@@ -280,7 +375,6 @@ class YTDLPApp:
 
     # --- DOWNLOAD LOGIC ---
     def queue_urls(self):
-        # Save settings silently so changes apply
         self.save_settings(show_msg = False)
 
         if not self.config.get('ytdlp_path'):
@@ -292,19 +386,16 @@ class YTDLPApp:
         if not urls:
             return
 
-        # Move URLs from input field to the queue treeview
         self.url_input.delete("1.0", tk.END)
         for u in urls:
             self.queue_tree.insert("", tk.END, values = (u, "Queued"))
 
-        # Start processing background thread if not already running
         if not self.is_downloading:
             self.is_downloading = True
             threading.Thread(target = self.process_queue, daemon = True).start()
 
     def process_queue(self):
         while True:
-            # 1. Find the next "Queued" item
             items = self.queue_tree.get_children()
             target_item = None
             target_url = ""
@@ -316,34 +407,54 @@ class YTDLPApp:
                     break
 
             if not target_item:
-                break  # Everything is done
+                break
 
-            # 2. Update status to downloading
             self.root.after(0, self.update_tree_status, target_item, "Downloading...")
             self.root.after(0, self.log_output, f"\n🚀 Starting: {target_url}\n")
             self.root.after(0, self.update_progress, 0.0)
 
-            # 3. Construct command
+            # Base command setup
             cmd = [
                 self.config['ytdlp_path'],
                 "--newline",
-                "-f", "ba",
-                "-x",
                 "--embed-metadata",
                 "--embed-thumbnail",
-                "--ppa", "ThumbnailsConvertor+ffmpeg_o:-c:v png -vf crop='ih'",
                 "--no-post-overwrites",
                 "-P", self.config['output_dir']
             ]
 
-            # Handle Audio Codec vs Remuxing
-            codec = self.config.get('audio_codec', 'opus')
-            if codec == 'mka':
-                cmd.extend(["--remux-video", "mka"])
-            elif codec == 'mp4':
-                cmd.extend(["--remux-video", "mp4"])
-            elif codec != 'none (keep original)':
-                cmd.extend(["--audio-format", codec])
+            # Parse Format Setup (Audio vs Video)
+            format_type = self.config.get('format_type', 'Audio')
+
+            if format_type == "Audio":
+                cmd.extend(["-f", "ba", "-x"])
+                cmd.extend(["--ppa", "ThumbnailsConvertor+ffmpeg_o:-c:v png -vf crop='ih'"])
+
+                codec = self.config.get('audio_codec', 'opus')
+                if codec == 'mka':
+                    cmd.extend(["--remux-video", "mka"])
+                elif codec == 'mp4':
+                    cmd.extend(["--remux-video", "mp4"])
+                elif codec != 'none (keep original)':
+                    cmd.extend(["--audio-format", codec])
+            else:
+                # Video logic Setup
+                res = self.config.get('video_res', 'Best')
+                res_str = "" if res == 'Best' else f"[height<={res.replace('p', '')}]"
+
+                audio_pref = self.config.get('video_audio_pref', 'Best Audio (Default)')
+
+                # Hierarchical Sorting string.
+                # If "Highly Compatible" is chosen, prioritize finding an internal AAC/M4A audio stream first,
+                # before safely falling back to whatever the best audio stream is.
+                if audio_pref == 'Highly Compatible (AAC/M4A)':
+                    cmd.extend(
+                        ["-f", f"bv*{res_str}+ba[ext=m4a]/bv*{res_str}+ba/b{res_str} / best"])
+                else:
+                    cmd.extend(["-f", f"bv*{res_str}+ba/b{res_str} / best"])
+
+                video_ext = self.config.get('video_ext', 'mp4')
+                cmd.extend(["--merge-output-format", video_ext])
 
             # Append Archive if enabled
             if self.config.get('use_archive', True):
@@ -365,7 +476,7 @@ class YTDLPApp:
 
             cmd.append(target_url)
 
-            # 4. Run Subprocess
+            # Run Subprocess
             try:
                 process = subprocess.Popen(
                     cmd,
@@ -378,10 +489,8 @@ class YTDLPApp:
                 )
 
                 for line in process.stdout:
-                    # Log output
                     self.root.after(0, self.log_output, line)
 
-                    # Parse output for progress percentage
                     match = PROGRESS_PATTERN.search(line)
                     if match:
                         try:
@@ -392,7 +501,6 @@ class YTDLPApp:
 
                 process.wait()
 
-                # 5. Assess final result for this specific URL
                 if process.returncode == 0:
                     self.root.after(0, self.update_tree_status, target_item, "✅ Done")
                 else:
@@ -402,7 +510,6 @@ class YTDLPApp:
                 self.root.after(0, self.log_output, f"System Error: {str(e)}\n")
                 self.root.after(0, self.update_tree_status, target_item, "❌ Failed")
 
-        # Finished all queued items
         self.root.after(0, self.update_progress, 0.0)
         self.root.after(0, self.log_output, "\n🎉 Queue Complete!\n")
         self.is_downloading = False
