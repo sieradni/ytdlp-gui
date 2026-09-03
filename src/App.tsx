@@ -1,14 +1,19 @@
 import { useEffect, useState } from "react";
 import TabBar from "./components/TabBar";
+import FirstRunWizard from "./components/FirstRunWizard";
 import HomePage from "./pages/Home";
 import HistoryPage from "./pages/History";
 import SettingsPage from "./pages/Settings";
 import { useUi } from "./stores/ui";
+import { useBinaries } from "./stores/binaries";
+import { useSettings } from "./stores/settings";
 import { ping } from "./lib/ipc";
 
 export default function App() {
   const page = useUi((s) => s.page);
   const [backend, setBackend] = useState<string>("backend: …");
+  const { loaded, wizardOpen } = useBinaries();
+  const loadSettings = useSettings((s) => s.load);
 
   // m1 typed-ipc probe: proves the bridge end to end on every launch.
   useEffect(() => {
@@ -25,6 +30,23 @@ export default function App() {
     };
   }, []);
 
+  // m2 bootstrap: settings load, binary status, event subscriptions,
+  // first-run wizard gate (§4).
+  useEffect(() => {
+    void loadSettings();
+    void useBinaries.getState().attach();
+    void useBinaries
+      .getState()
+      .refresh()
+      .then(() => {
+        const s = useBinaries.getState();
+        const dismissed = useSettings.getState().settings.wizardDismissed;
+        if (s.manifest && !s.manifest.ready && !dismissed) {
+          s.setWizardOpen(true);
+        }
+      });
+  }, [loadSettings]);
+
   return (
     <div className="app h-full flex flex-col">
       <TabBar />
@@ -37,6 +59,7 @@ export default function App() {
       <div className="hint" style={{ padding: "2px 14px 6px" }}>
         {backend}
       </div>
+      {loaded && wizardOpen && <FirstRunWizard />}
     </div>
   );
 }

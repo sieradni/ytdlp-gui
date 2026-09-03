@@ -1,35 +1,31 @@
-use serde::Serialize;
-use std::sync::atomic::{AtomicU64, Ordering};
+mod binaries;
+mod commands;
+mod error;
+mod settings;
 
-/// Shared app state. M1: placeholder with a monotonically increasing
-/// request counter; engine/queue state lands in M2/M3.
-pub struct AppState {
-    ping_count: AtomicU64,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Pong {
-    pub message: String,
-    pub ping_count: u64,
-}
-
-#[tauri::command]
-fn ping(state: tauri::State<'_, AppState>, message: Option<String>) -> Result<Pong, String> {
-    let count = state.ping_count.fetch_add(1, Ordering::SeqCst) + 1;
-    Ok(Pong {
-        message: format!("pong: {}", message.as_deref().unwrap_or("(none)")),
-        ping_count: count,
-    })
-}
+use settings::SettingsHandle;
+use std::sync::Mutex;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let settings = settings::load();
+
     tauri::Builder::default()
-        .manage(AppState {
-            ping_count: AtomicU64::new(0),
+        .manage(SettingsHandle(Mutex::new(settings)))
+        .manage(commands::PingState {
+            count: std::sync::atomic::AtomicU64::new(0),
         })
-        .invoke_handler(tauri::generate_handler![ping])
+        .invoke_handler(tauri::generate_handler![
+            commands::ping,
+            commands::settings_get,
+            commands::settings_save,
+            commands::app_version,
+            commands::binaries::binaries_status,
+            commands::binaries::binaries_install,
+            commands::binaries::binaries_update,
+            commands::binaries::binaries_check_latest,
+            commands::binaries::binaries_set_custom_path,
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
