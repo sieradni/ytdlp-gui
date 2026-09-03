@@ -101,6 +101,14 @@ function HoverCard({ job, anchor }: { job: Job; anchor: HTMLElement }) {
         <span style={{ color: "var(--text)", overflowWrap: "anywhere" }}>{job.url}</span>
         <span>status</span>
         <span style={{ color: "var(--text)" }}>{job.state}{job.error ? ` — ${job.error}` : ""}</span>
+        {job.itemsTotal != null && (
+          <>
+            <span>playlist</span>
+            <span style={{ color: "var(--text)" }}>
+              {job.itemsDone ?? 0} / {job.itemsTotal} items
+            </span>
+          </>
+        )}
         <span>destination</span>
         <span style={{ color: "var(--text)", overflowWrap: "anywhere" }}>
           {job.finalPath ?? "(not yet)"}
@@ -116,6 +124,19 @@ function Row({ job, index }: { job: Job; index: number }) {
   const [hoverJob, setHoverJob] = useState<Job | null>(null);
   const rowRef = useRef<HTMLTableRowElement>(null);
   const open = useQueue((s) => s.expanded.has(job.id));
+  // completion feedback in-place (§6): a one-shot row flash when a job lands
+  // on done — quiet enough to not demand attention, per the design language.
+  const [doneFlash, setDoneFlash] = useState(false);
+  const prevState = useRef(job.state);
+  useEffect(() => {
+    const was = prevState.current;
+    prevState.current = job.state;
+    if (was !== "done" && job.state === "done") {
+      setDoneFlash(true);
+      const t = setTimeout(() => setDoneFlash(false), 1500);
+      return () => clearTimeout(t);
+    }
+  }, [job.state]);
 
   const armHover = () => {
     if (hoverTimer) clearTimeout(hoverTimer);
@@ -135,6 +156,7 @@ function Row({ job, index }: { job: Job; index: number }) {
         ref={rowRef}
         className="qrow"
         data-status={job.state}
+        data-flash={doneFlash ? "done" : undefined}
         onMouseOver={armHover}
         onMouseOut={() => {
           disarmHover();

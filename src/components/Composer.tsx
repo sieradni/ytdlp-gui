@@ -123,13 +123,23 @@ export default function Composer() {
     <div className="card">
       <div className="card-h">
         <h2>add downloads</h2>
-        <span className="hint">one url per line · playlists expand</span>
+        <span className="hint">one url per line · playlists expand · enter to queue</span>
       </div>
       <div className="card-b">
         <textarea
           rows={2}
           value={urls}
           onChange={(e) => setUrls(e.target.value)}
+          onKeyDown={(e) => {
+            // enter queues (§6 keyboard/ux polish); shift+enter inserts a
+            // newline for multi-line pastes. IME compositions must not be
+            // hijacked (isComposing). empty composer: no-op, no feedback
+            // spam.
+            if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+              e.preventDefault();
+              if (urlCount > 0) void queue();
+            }
+          }}
           placeholder="https://www.youtube.com/watch?v=…"
         />
 

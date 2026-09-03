@@ -367,6 +367,21 @@ tbody tr:hover {
   background: var(--green);
   opacity: 1;
 }
+
+/* completion feedback in-place (§6): one-shot 1.5s flash when a job lands
+   on done — green tint fading out. the global prefers-reduced-motion rule
+   (below) already collapses this to an instant, invisible transition. */
+.qrow[data-flash="done"] td {
+  animation: qrow-done-flash 1.5s ease-out;
+}
+@keyframes qrow-done-flash {
+  from {
+    background-color: color-mix(in srgb, var(--green) 16%, transparent);
+  }
+  to {
+    background-color: transparent;
+  }
+}
 .qrow[data-status="error"] td:first-child::before {
   background: var(--red);
   opacity: 1;
