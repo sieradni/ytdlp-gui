@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { open } from "@tauri-apps/plugin-dialog";
 import { binariesInstall, binariesSetCustomPath, type Tool } from "../lib/ipc";
 import { useBinaries } from "../stores/binaries";
 import { useSettings } from "../stores/settings";
@@ -40,10 +41,14 @@ export default function FirstRunWizard() {
   };
 
   const useOwn = async (tool: Tool) => {
-    // escape hatch inline: point at PATH copies by absolute path (D40)
-    const p = window.prompt(`full path to ${tool}.exe:`);
-    if (!p) return;
-    await binariesSetCustomPath(tool, p);
+    // escape hatch inline: pick a PATH copy by file dialog (D40)
+    const picked = await open({
+      multiple: false,
+      directory: false,
+      filters: [{ name: "executables", extensions: ["exe"] }],
+    });
+    if (typeof picked !== "string") return;
+    await binariesSetCustomPath(tool, picked);
     await refresh();
   };
 

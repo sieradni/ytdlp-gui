@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { open } from "@tauri-apps/plugin-dialog";
 import {
   binariesCheckLatest,
   binariesSetCustomPath,
@@ -51,12 +52,15 @@ export default function ToolRow({ status }: { status: ToolStatus }) {
   };
 
   const setCustom = async () => {
-    const p = window.prompt(
-      `full path to your own ${tool} binary (empty to go back to managed):`,
-      status.path ?? "",
-    );
-    if (p === null) return;
-    await binariesSetCustomPath(tool, p.trim() || null);
+    // custom-binary escape hatch (D40). cancel keeps the managed binary;
+    // picking a file points the app at it and disables managed updates.
+    const picked = await open({
+      multiple: false,
+      directory: false,
+      filters: [{ name: "executables", extensions: ["exe"] }],
+    });
+    if (typeof picked !== "string") return;
+    await binariesSetCustomPath(tool, picked);
     await refresh();
   };
 
