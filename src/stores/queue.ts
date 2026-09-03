@@ -1,0 +1,217 @@
+import { create } from "zustand";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import {
+  jobAdd,
+  jobRemove,
+  jobRetry,
+  jobStop,
+  queueList,
+  queuePause,
+  queueResume,
+  type Job,
+  type JobOptions,
+  type JobState,
+} from "../lib/ipc";
+
+// ---------------------------------------------------------------------------
+// sorting (§6): header click cycles asc ▲ → desc ▼ → default; default =
+// insertion order; sort is a live view; ties break stably by insertion.
+// ---------------------------------------------------------------------------
+
+export type SortKey = "_order" | "title" | "format" | "status" | "pct" | "speed" | "eta";
+export type SortDir = "asc" | "desc";
+
+export const STATUS_ORDER: JobState[] = [
+  "fetching",
+  "queued",
+  "downloading",
+  "post",
+  "done",
+  "stopped",
+  "error",
+  "duplicate",
+];
+
+const statusRank = (s: JobState) => STATUS_ORDER.indexOf(s);
+
+function compareJobs(a: Job, b: Job, key: SortKey, dir: SortDir): number {
+  if (key === "_order") return 0; // insertion order == stored order
+  const mul = dir === "asc" ? 1 : -1;
+  // format sort reads job.format (hidden column — menu-only sort, D21)
+  const getters: Record<Exclude<SortKey, "_order">, (j: Job) => string | number | null> = {
+    title: (j) => j.title,
+    format: (j) => j.format,
+    status: (j) => statusRank(j.state),
+    pct: (j) => j.pct,
+    speed: (j) => j.speedBps,
+    eta: (j) => j.etaSec,
+  };
+  const get = getters[key];
+  const av = get(a);
+  const bv = get(b);
+  if (av == null && bv == null) return 0;
+  if (av == null) return 1; // missing values sort last regardless of dir
+  if (bv == null) return -1;
+  if (typeof av === "string" && typeof bv === "string") {
+    return av.localeCompare(bv) * mul;
+  }
+  return ((av as number) - (bv as number)) * mul;
+}
+
+interface QueueState {
+  jobs: Job[];
+  loaded: boolean;
+  paused: boolean;
+  sortKey: SortKey;
+  sortDir: SortDir;
+  expanded: Set<string>;
+  error: string | null;
+
+  load: () => Promise<void>;
+  /** derived sorted view — new items insert at their sorted position */
+  sorted: () => Job[];
+  setSort: (key: SortKey, dir?: SortDir) => void;
+  cycleSort: (key: SortKey) => void;
+  toggleExpanded: (id: string) => void;
+
+  add: (urls: string[], options: JobOptions, destination?: string) => Promise<AddFeedbackLike>;
+  stop: (id: string) => Promise<void>;
+  retry: (id: string) => Promise<void>;
+  remove: (id: string) => Promise<void>;
+  pause: () => Promise<void>;
+  resume: () => Promise<void>;
+
+  /** wire job:update / job:log / queue:changed; returns unlisten fns */
+  attach: () => Promise<UnlistenFn[]>;
+}
+
+export interface AddFeedbackLike {
+  jobs: Job[];
+  invalid: [string, string][];
+  duplicatesSkipped: number;
+}
+
+export const useQueue = create<QueueState>((set, get) => ({
+  jobs: [],
+  loaded: false,
+  paused: false,
+  sortKey: "_order",
+  sortDir: "asc",
+  expanded: new Set<string>(),
+  error: null,
+
+  load: async () => {
+    const jobs = await queueList();
+    set({ jobs, loaded: true });
+  },
+
+  sorted: () => {
+    const { jobs, sortKey, sortDir } = get();
+    if (sortKey === "_order") return [...jobs].sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id));
+    return [...jobs]
+      .map((j, i) => ({ j, i }))
+      .sort((x, y) => {
+        const c = compareJobs(x.j, y.j, sortKey, sortDir);
+        // stable ties by insertion sequence (§6)
+        return c !== 0 ? c : x.i - y.i;
+      })
+      .map((x) => x.j);
+  },
+
+  setSort: (key, dir = "asc") => set({ sortKey: key, sortDir: dir }),
+  /** header click cycle: asc → desc → default (§6) */
+  cycleSort: (key) => {
+    const { sortKey, sortDir } = get();
+    if (sortKey !== key) {
+      set({ sortKey: key, sortDir: "asc" });
+    } else if (sortDir === "asc") {
+      set({ sortKey: key, sortDir: "desc" });
+    } else {
+      set({ sortKey: "_order", sortDir: "asc" });
+    }
+  },
+
+  toggleExpanded: (id) =>
+    set((s) => {
+      const expanded = new Set(s.expanded);
+      if (expanded.has(id)) expanded.delete(id);
+      else expanded.add(id);
+      return { expanded };
+    }),
+
+  add: async (urls, options, destination) => {
+    const fb = await jobAdd(urls, options, destination);
+    await get().load();
+    return fb;
+  },
+  stop: async (id) => {
+    await jobStop(id);
+    await get().load();
+  },
+  retry: async (id) => {
+    await jobRetry(id);
+    await get().load();
+  },
+  remove: async (id) => {
+    await jobRemove(id);
+    await get().load();
+  },
+  pause: async () => set({ paused: await queuePause() }),
+  resume: async () => set({ paused: await queueResume() }),
+
+  attach: async () => {
+    const onJobUpdate = await listen<Partial<Job> & { id: string; state?: JobState }>(
+      "job:update",
+      (e) => {
+        const p = e.payload;
+        set((s) => ({
+          jobs: s.jobs.map((j) =>
+            j.id === p.id
+              ? {
+                  ...j,
+                  state: p.state ?? j.state,
+                  pct: p.pct ?? j.pct,
+                  speedBps: "speedBps" in p ? (p.speedBps ?? null) : j.speedBps,
+                  etaSec: "etaSec" in p ? (p.etaSec ?? null) : j.etaSec,
+                  title: p.title ?? j.title,
+                  finalPath: p.finalPath ?? j.finalPath,
+                  error: "error" in p ? (p.error ?? null) : j.error,
+                  skipped: p.skipped ?? j.skipped,
+                }
+              : j,
+          ),
+        }));
+      },
+    );
+    const onJobLog = await listen<{ id: string; line: string }>("job:log", (e) => {
+      set((s) => ({
+        jobs: s.jobs.map((j) =>
+          j.id === e.payload.id
+            ? { ...j, output: [...j.output.slice(-499), e.payload.line] }
+            : j,
+        ),
+      }));
+    });
+    return [onJobUpdate, onJobLog];
+  },
+}));
+
+/** engine status seam — components subscribe; queue:changed updates it. */
+interface EngineCounts {
+  active: number;
+  queued: number;
+}
+interface EngineStore {
+  counts: EngineCounts | null;
+  setCounts: (c: EngineCounts | null) => void;
+}
+export const useEngineCounts = create<EngineStore>((set) => ({
+  counts: null,
+  setCounts: (counts) => set({ counts }),
+}));
+
+export async function attachEngineCounts(): Promise<UnlistenFn> {
+  return listen<{ active: number; queued: number }>("queue:changed", (e) =>
+    useEngineCounts.getState().setCounts(e.payload),
+  );
+}

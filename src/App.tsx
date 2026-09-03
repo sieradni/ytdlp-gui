@@ -7,34 +7,24 @@ import SettingsPage from "./pages/Settings";
 import { useUi } from "./stores/ui";
 import { useBinaries } from "./stores/binaries";
 import { useSettings } from "./stores/settings";
-import { ping } from "./lib/ipc";
+import { useQueue, attachEngineCounts } from "./stores/queue";
 
 export default function App() {
   const page = useUi((s) => s.page);
-  const [backend, setBackend] = useState<string>("backend: …");
   const { loaded, wizardOpen } = useBinaries();
   const loadSettings = useSettings((s) => s.load);
+  const loadQueue = useQueue((s) => s.load);
+  const [queueError, setQueueError] = useState<string | null>(null);
 
-  // m1 typed-ipc probe: proves the bridge end to end on every launch.
+  // m2/m3 bootstrap: settings, binary status + wizard gate, queue mirror,
+  // event subscriptions. no ipc probe display — the engine status is real now.
   useEffect(() => {
-    let alive = true;
-    ping("m1")
-      .then((pong) => {
-        if (alive) setBackend(`backend: ok (${pong.message})`);
-      })
-      .catch((e) => {
-        if (alive) setBackend(`backend: error (${String(e)})`);
-      });
-    return () => {
-      alive = false;
-    };
-  }, []);
-
-  // m2 bootstrap: settings load, binary status, event subscriptions,
-  // first-run wizard gate (§4).
-  useEffect(() => {
+    let unEngine: (() => void) | undefined;
     void loadSettings();
     void useBinaries.getState().attach();
+    void attachEngineCounts().then((un) => {
+      unEngine = un;
+    });
     void useBinaries
       .getState()
       .refresh()
@@ -45,7 +35,28 @@ export default function App() {
           s.setWizardOpen(true);
         }
       });
-  }, [loadSettings]);
+    void useQueue
+      .getState()
+      .attach()
+      .catch((e) => setQueueError(String(e)));
+    void loadQueue().catch((e) => setQueueError(String(e)));
+    return () => {
+      unEngine?.();
+    };
+  }, [loadSettings, loadQueue]);
+
+  // §6 keyboard polish: ctrl+v focuses the composer from anywhere
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === "v") {
+        useUi.getState().setPage("home");
+        const el = document.querySelector<HTMLTextAreaElement>(".card-b textarea");
+        el?.focus();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   return (
     <div className="app h-full flex flex-col">
@@ -55,10 +66,11 @@ export default function App() {
         {page === "history" && <HistoryPage />}
         {page === "settings" && <SettingsPage />}
       </main>
-      {/* temporary m1 probe — replaced by real engine status in m3 */}
-      <div className="hint" style={{ padding: "2px 14px 6px" }}>
-        {backend}
-      </div>
+      {queueError && (
+        <div className="warn" style={{ padding: "2px 14px 6px" }}>
+          queue: {queueError}
+        </div>
+      )}
       {loaded && wizardOpen && <FirstRunWizard />}
     </div>
   );

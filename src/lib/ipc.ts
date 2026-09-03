@@ -6,7 +6,7 @@ import { invoke } from "@tauri-apps/api/core";
  */
 
 // ---------------------------------------------------------------------------
-// m1 probe — removed when m3 lands real engine status
+// m1 probe — remove when the shell probe goes away
 // ---------------------------------------------------------------------------
 
 export interface Pong {
@@ -65,7 +65,7 @@ export const binariesSetCustomPath = (tool: Tool, path: string | null) =>
   invoke<ToolStatus>("binaries_set_custom_path", { tool, path });
 
 // ---------------------------------------------------------------------------
-// settings (m2 minimal; autosave per D24)
+// settings (§7; autosave per D24)
 // ---------------------------------------------------------------------------
 
 export interface Settings {
@@ -79,8 +79,151 @@ export const settingsGet = () => invoke<Settings>("settings_get");
 export const settingsSave = (settings: Settings) => invoke<void>("settings_save", { settings });
 
 // ---------------------------------------------------------------------------
-// appVersion (§7)
+// composer options — mirrors src-tauri/src/engine/args.rs (D19: one shape)
 // ---------------------------------------------------------------------------
+
+export type DlType = "audio" | "video";
+export type AudioFormat =
+  | "best"
+  | "mp3"
+  | "m4a"
+  | "opus"
+  | "vorbis"
+  | "flac"
+  | "alac"
+  | "wav"
+  | "mka"
+  | "mp4container";
+export type CoverMode = "square" | "original" | "custom" | "none";
+export type PlaylistMode = "single" | "all" | "firstn";
+export type VideoContainer = "mp4" | "mkv" | "webm";
+export type VideoAudioPref = "opus" | "aac";
+export type CookieKind = "none" | "frombrowser" | "file";
+
+export interface CookieSource {
+  kind: CookieKind;
+  browser: string | null;
+  file: string | null;
+}
+
+export interface AfterDownload {
+  keep: true;
+} // unused placeholder to keep option names aligned
+
+export interface JobOptions {
+  dlType: DlType;
+  audioFormat: AudioFormat;
+  coverMode: CoverMode;
+  coverW: number;
+  coverH: number;
+  maxResolution: string;
+  container: VideoContainer;
+  audioPref: VideoAudioPref;
+  playlistMode: PlaylistMode;
+  playlistN: number;
+  skipDownloaded: boolean;
+  afterDownload: "keep" | "move";
+  moveTarget: string | null;
+  cookies: CookieSource;
+  subtitleLangs: string[];
+  autoCaptions: boolean;
+  sponsorblock: string[];
+  extraArgs: string[];
+  outputTemplate: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// jobs / queue (m3, §5)
+// ---------------------------------------------------------------------------
+
+export type JobState =
+  | "queued"
+  | "fetching"
+  | "downloading"
+  | "post"
+  | "done"
+  | "stopped"
+  | "error"
+  | "duplicate";
+
+export interface Job {
+  id: string;
+  url: string;
+  state: JobState;
+  title: string | null;
+  format: string | null;
+  finalPath: string | null;
+  pct: number | null;
+  speedBps: number | null;
+  etaSec: number | null;
+  error: string | null;
+  skipped: boolean;
+  output: string[];
+  createdAt: number;
+}
+
+export interface AddFeedback {
+  jobs: Job[];
+  invalid: [string, string][];
+  duplicatesSkipped: number;
+}
+
+export const jobAdd = (urls: string[], options: JobOptions, destination?: string) =>
+  invoke<AddFeedback>("job_add", { urls, options, destination: destination ?? null });
+export const jobStop = (id: string) => invoke<void>("job_stop", { id });
+export const jobRetry = (id: string) => invoke<void>("job_retry", { id });
+export const jobRemove = (id: string) => invoke<void>("job_remove", { id });
+export const queueList = () => invoke<Job[]>("queue_list");
+export const queuePause = () => invoke<boolean>("queue_pause");
+export const queueResume = () => invoke<boolean>("queue_resume");
+
+// ---------------------------------------------------------------------------
+// metadata (§7, D44) + history (§5.3)
+// ---------------------------------------------------------------------------
+
+export interface ResolvedIdentity {
+  extractor: string;
+  id: string;
+  title: string | null;
+}
+
+export const metadataResolve = (url: string) =>
+  invoke<ResolvedIdentity>("metadata_resolve", { url });
+
+export interface HistoryRow {
+  extractor: string;
+  vid: string;
+  url: string | null;
+  title: string | null;
+  channel: string | null;
+  durationSec: number | null;
+  sizeBytes: number | null;
+  format: string | null;
+  finalPath: string | null;
+  error: string | null;
+  downloadedAt: number;
+}
+
+export const historyList = (filter?: string) =>
+  invoke<HistoryRow[]>("history_list", { filter: filter ?? null });
+export const historyImportArchive = (path: string, copy?: boolean) =>
+  invoke<{ idsImported: number; archivePath: string }>("history_import_archive", {
+    path,
+    copy: copy ?? null,
+  });
+export const historyRelink = (id: string, path: string | null) =>
+  invoke<void>("history_relink", { id, path });
+
+// ---------------------------------------------------------------------------
+// app paths + version (§7)
+// ---------------------------------------------------------------------------
+
+export interface AppPaths {
+  archivePath: string;
+  binDir: string;
+}
+
+export const appPaths = () => invoke<AppPaths>("app_paths");
 
 export interface AppVersions {
   app: string;

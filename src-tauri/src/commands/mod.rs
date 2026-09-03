@@ -1,4 +1,7 @@
 pub mod binaries;
+pub mod history;
+pub mod jobs;
+pub mod metadata;
 
 use serde::Serialize;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -7,7 +10,7 @@ use crate::error::AppResult;
 use crate::settings::{Settings, SettingsHandle};
 
 // ---------------------------------------------------------------------------
-// ping — m1 typed-ipc probe, kept until m3 replaces it with real status
+// ping — m1 typed-ipc probe, kept until the shell probe is removed
 // ---------------------------------------------------------------------------
 
 pub struct PingState {
@@ -40,8 +43,38 @@ pub fn settings_get(state: tauri::State<'_, SettingsHandle>) -> Settings {
 }
 
 #[tauri::command]
-pub fn settings_save(state: tauri::State<'_, SettingsHandle>, settings: Settings) -> AppResult<()> {
-    state.set(settings)
+pub fn settings_save(
+    state: tauri::State<'_, SettingsHandle>,
+    queue: tauri::State<'_, jobs::QueueHandle>,
+    settings: Settings,
+) -> AppResult<()> {
+    // concurrency applies live (§5: configurable in settings → downloads)
+    let concurrency = settings.concurrency;
+    state.set(settings)?;
+    if let Some(n) = concurrency {
+        queue.0.set_concurrency(n as usize);
+    }
+    Ok(())
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppPaths {
+    pub archive_path: String,
+    pub bin_dir: String,
+}
+
+/// paths the settings page and history footer link to (§4/§6).
+#[tauri::command]
+pub fn app_paths() -> AppPaths {
+    AppPaths {
+        archive_path: crate::store::archive_path_from_settings()
+            .to_string_lossy()
+            .into_owned(),
+        bin_dir: crate::binaries::manager::bin_dir()
+            .to_string_lossy()
+            .into_owned(),
+    }
 }
 
 // ---------------------------------------------------------------------------

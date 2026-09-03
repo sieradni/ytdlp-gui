@@ -1,5 +1,5 @@
 import { useUi, type PageId } from "../stores/ui";
-import { useEngine } from "../stores/engine";
+import { useEngineStatus } from "../stores/engine";
 
 const TABS: { id: PageId; label: string }[] = [
   { id: "home", label: "home" },
@@ -14,7 +14,7 @@ const TABS: { id: PageId; label: string }[] = [
 export default function TabBar() {
   const page = useUi((s) => s.page);
   const setPage = useUi((s) => s.setPage);
-  const engine = useEngine((s) => s.status);
+  const engine = useEngineStatus();
 
   return (
     <header
@@ -24,9 +24,7 @@ export default function TabBar() {
       {TABS.map((t) => (
         <button
           key={t.id}
-          className={
-            "tab-btn" + (page === t.id ? " active" : "")
-          }
+          className={"tab-btn" + (page === t.id ? " active" : "")}
           onClick={() => setPage(t.id)}
         >
           {t.label}
