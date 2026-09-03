@@ -1,5 +1,8 @@
 import { SavedFlash } from "../components/SavedFlash";
 import ToolRow from "../components/ToolRow";
+import { useEffect, useState } from "react";
+import { getVersion } from "@tauri-apps/api/app";
+import { useAppUpdate } from "../lib/appUpdate";
 import { useBinaries } from "../stores/binaries";
 import { useSettings } from "../stores/settings";
 
@@ -33,10 +36,7 @@ export default function SettingsPage() {
             update = download latest build (~90 mb), verify sha-256, swap atomically. never automatic.
           </div>
           <label>app updates</label>
-          <div className="row flex items-center gap-2">
-            <span className="numm">v2.0.0-alpha.1</span>
-            <span className="hint">in-app updater arrives in m5</span>
-          </div>
+          <AppUpdateRow />
           <label></label>
           <div className="row flex items-center gap-2">
             <span className="hint">first-run wizard</span>
@@ -112,6 +112,64 @@ export default function SettingsPage() {
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+/** §6 tools card, app-updates row: version · check now · one-click install. */
+function AppUpdateRow() {
+  const { phase, error, update, received, total, startInstall } = useAppUpdate();
+  const [appVersion, setAppVersion] = useState<string | null>(null);
+  useEffect(() => {
+    void getVersion().then(setAppVersion).catch(() => setAppVersion(null));
+  }, []);
+
+  let hint: string;
+  switch (phase) {
+    case "checking":
+      hint = "checking…";
+      break;
+    case "up-to-date":
+      hint = "up to date ✓";
+      break;
+    case "available":
+      hint = `update available → ${update?.version ?? "?"}`;
+      break;
+    case "downloading": {
+      const pct =
+        total != null && total > 0 ? `${Math.min(100, (received / total) * 100).toFixed(0)}%` : "…";
+      hint = `downloading ${pct}`;
+      break;
+    }
+    case "installing":
+      hint = "installing — restarting…";
+      break;
+    case "error":
+      hint = `update check failed: ${error ?? "?"}`;
+      break;
+    default:
+      hint = "checks on launch and every 6 h";
+  }
+
+  const busy = phase === "checking" || phase === "downloading" || phase === "installing";
+
+  return (
+    <div className="row flex items-center gap-2">
+      <span className="numm">{appVersion ?? "v?"}</span>
+      <button
+        className="btn sm"
+        disabled={busy}
+        onClick={() => {
+          if (phase === "available") {
+            void startInstall();
+          } else {
+            void useAppUpdate.getState().checkNow(true);
+          }
+        }}
+      >
+        {phase === "available" ? "update & restart" : "check now"}
+      </button>
+      <span className={phase === "error" ? "warn" : "hint"}>{hint}</span>
     </div>
   );
 }

@@ -1,0 +1,57 @@
+# §9: release on tag v* — tauri-action builds the NSIS installer, signs the
+# updater artifacts with the minisign key (secret), creates the GitHub
+# release, and attaches latest.json so the in-app updater (§8) finds it.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch: # manual test run; releases only make sense from a tag
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - name: setup node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: setup rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: install frontend deps
+        run: pnpm install --frozen-lockfile
+
+      - name: build + release (tauri-action)
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # minisign key for the updater artifacts (§8); pubkey lives in
+          # tauri.conf.json, private key here only
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "ytdlp-gui ${{ github.ref_name }}"
+          releaseBody: "see the assets below to download and install the app."
+          releaseDraft: false
+          # v2.0.0-alpha.1 style tags publish as prereleases
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          includeUpdaterJson: true

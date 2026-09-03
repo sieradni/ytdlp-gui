@@ -1,9 +1,11 @@
 import { useEffect, useState } from "react";
 import TabBar from "./components/TabBar";
 import FirstRunWizard from "./components/FirstRunWizard";
+import UpdateBanner from "./components/UpdateBanner";
 import HomePage from "./pages/Home";
 import HistoryPage from "./pages/History";
 import SettingsPage from "./pages/Settings";
+import { attachAppUpdatePolling } from "./lib/appUpdate";
 import { useUi } from "./stores/ui";
 import { useBinaries } from "./stores/binaries";
 import { useSettings } from "./stores/settings";
@@ -15,6 +17,9 @@ export default function App() {
   const loadSettings = useSettings((s) => s.load);
   const loadQueue = useQueue((s) => s.load);
   const [queueError, setQueueError] = useState<string | null>(null);
+
+  // m5 bootstrap: app-update polling (launch + 6 h, §8)
+  useEffect(() => attachAppUpdatePolling(), []);
 
   // m2/m3 bootstrap: settings, binary status + wizard gate, queue mirror,
   // event subscriptions. no ipc probe display — the engine status is real now.
@@ -71,6 +76,7 @@ export default function App() {
           queue: {queueError}
         </div>
       )}
+      <UpdateBanner />
       {loaded && wizardOpen && <FirstRunWizard />}
     </div>
   );

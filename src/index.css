@@ -475,6 +475,20 @@ tbody tr:hover {
   }
 }
 
+/* ===== app-update banner (§8) — slimmer than a card; amber accents only ===== */
+.update-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 14px;
+  border-top: 1px solid var(--line);
+  background: var(--bg-card);
+  font-size: 12px;
+}
+.update-banner .grow {
+  flex: 1;
+}
+
 /* ===== reduced motion (M6 polish; cheap to respect now) ===== */
 @media (prefers-reduced-motion: reduce) {
   *,
