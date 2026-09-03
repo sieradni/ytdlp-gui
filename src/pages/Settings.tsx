@@ -102,8 +102,8 @@ export default function SettingsPage() {
         </div>
         <div className="card-b fgrid">
           <label>version</label>
+          <VersionRow />
           <div className="row flex items-center gap-2">
-            <span className="numm">v2.0.0-alpha.1</span>
             <span className="hint">ytdlp-gui · windows x64</span>
           </div>
           <label>license</label>
@@ -116,13 +116,29 @@ export default function SettingsPage() {
   );
 }
 
+/** Real app version from the Tauri runtime — never a hardcoded literal,
+ * so it stays truthful after an in-app update. */
+function useAppVersion(): string | null {
+  const [version, setVersion] = useState<string | null>(null);
+  useEffect(() => {
+    void getVersion().then(setVersion).catch(() => setVersion(null));
+  }, []);
+  return version;
+}
+
+function VersionRow() {
+  const version = useAppVersion();
+  return (
+    <div className="row flex items-center gap-2">
+      <span className="numm">{version ? `v${version}` : "v?"}</span>
+    </div>
+  );
+}
+
 /** §6 tools card, app-updates row: version · check now · one-click install. */
 function AppUpdateRow() {
   const { phase, error, update, received, total, startInstall } = useAppUpdate();
-  const [appVersion, setAppVersion] = useState<string | null>(null);
-  useEffect(() => {
-    void getVersion().then(setAppVersion).catch(() => setAppVersion(null));
-  }, []);
+  const appVersion = useAppVersion();
 
   let hint: string;
   switch (phase) {

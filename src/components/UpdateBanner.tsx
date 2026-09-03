@@ -2,7 +2,9 @@ import { useAppUpdate } from "../lib/appUpdate";
 
 /**
  * §8: "app polls on launch + 6h → in-app banner → 'update & restart'".
- * rendered below the tab bar; dismissible until the user starts installing.
+ * rendered below the tab bar while an update is available or installing;
+ * disappears when the update lands or the phase resets. (dismiss is an m6
+ * candidate — not promised by §8, so not implemented yet)
  */
 export default function UpdateBanner() {
   const { phase, update, received, total, installing, startInstall } = useAppUpdate();
