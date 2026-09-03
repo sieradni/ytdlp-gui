@@ -36,15 +36,33 @@ pub struct Source {
     /// value stored in the manifest's `source` field.
     pub id: &'static str,
     repo: &'static str,
-    /// exact asset name in `/releases/latest` (btbN's latest build keeps a
-    /// stable asset name; gyan releases ship one zip per tag).
+    /// asset name in `/releases/latest` (exact for `suffix: None`); for
+    /// `suffix: Some(s)` assets are matched by `name.ends_with(s)` — gyan
+    /// names its zips per release tag (`ffmpeg-9.0.1-essentials_build.zip`),
+    /// so no stable exact name exists to match.
     asset: &'static str,
+    suffix: Option<&'static str>,
+}
+
+impl Source {
+    /// does this release asset belong to this source?
+    pub fn asset_matches(&self, name: &str) -> bool {
+        name == self.asset || self.suffix.is_some_and(|s| name.ends_with(s))
+    }
+
+    /// rolling sources re-publish one release (same tag) with new assets
+    /// (btbN's `latest`); tag comparison can never signal change for them —
+    /// the release etag is the change signal instead.
+    pub fn rolling(&self) -> bool {
+        self.id == "btbn"
+    }
 }
 
 pub const YT_DLP_SOURCES: &[Source] = &[Source {
     id: "github",
     repo: "yt-dlp/yt-dlp",
     asset: "yt-dlp.exe",
+    suffix: None,
 }];
 
 pub const FFMPEG_SOURCES: &[Source] = &[
@@ -53,12 +71,15 @@ pub const FFMPEG_SOURCES: &[Source] = &[
         id: "btbn",
         repo: "BtbN/FFmpeg-Builds",
         asset: "ffmpeg-master-latest-win64-gpl.zip",
+        suffix: None,
     },
-    // gyan.dev release-essentials fallback (D4). real version tags.
+    // gyan.dev release-essentials fallback (D4). real version tags; asset
+    // name embeds the version, matched by suffix.
     Source {
         id: "gyan",
         repo: "GyanD/codexffmpeg",
-        asset: "ffmpeg-release-essentials.zip",
+        asset: "ffmpeg-<tag>-essentials_build.zip",
+        suffix: Some("-essentials_build.zip"),
     },
 ];
 
@@ -135,7 +156,7 @@ async fn latest_from_source(
             let Some(dl) = a["browser_download_url"].as_str() else {
                 continue;
             };
-            if name == src.asset {
+            if src.asset_matches(name) {
                 asset_url = Some(dl.to_owned());
             } else if name == "SHA2-SUMS.txt" {
                 sums_url = Some(dl.to_owned());
@@ -281,6 +302,26 @@ mod tests {
         assert!(FFMPEG_SOURCES[0]
             .asset
             .starts_with("ffmpeg-master-latest-win64-gpl"));
+    }
+
+    #[test]
+    fn gyan_suffix_matches_real_asset_names() {
+        let gyan = &FFMPEG_SOURCES[1];
+        // live names observed from the github api (2026-09)
+        assert!(gyan.asset_matches("ffmpeg-9.0.1-essentials_build.zip"));
+        assert!(gyan.asset_matches("ffmpeg-7.1.1-essentials_build.zip"));
+        assert!(!gyan.asset_matches("ffmpeg-9.0.1-full_build.zip"));
+        assert!(!gyan.asset_matches("ffmpeg-9.0.1-essentials_build.zip.sig"));
+        // btbn + yt-dlp stay exact-match
+        assert!(FFMPEG_SOURCES[0].asset_matches("ffmpeg-master-latest-win64-gpl.zip"));
+        assert!(!FFMPEG_SOURCES[0].asset_matches("ffmpeg-master-latest-win64-gpl-shared.zip"));
+    }
+
+    #[test]
+    fn only_btbn_is_rolling() {
+        assert!(FFMPEG_SOURCES[0].rolling());
+        assert!(!FFMPEG_SOURCES[1].rolling());
+        assert!(!YT_DLP_SOURCES[0].rolling());
     }
 
     #[test]

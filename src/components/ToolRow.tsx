@@ -25,11 +25,9 @@ export default function ToolRow({ status }: { status: ToolStatus }) {
     setMsg(null);
     try {
       const after = await binariesCheckLatest(tool);
-      setMsg(
-        after.latestTag && after.latestTag !== status.version
-          ? `latest: ${after.latestTag}`
-          : "up to date",
-      );
+      // informational only — availability is the badge (record_check); for
+      // btbN the tag is literally "latest" so never compare it to the version
+      setMsg(after.latestTag ? `latest: ${after.latestTag}` : null);
       await refresh();
     } catch (e) {
       setMsg(String(e));
@@ -62,7 +60,10 @@ export default function ToolRow({ status }: { status: ToolStatus }) {
     await refresh();
   };
 
-  const badge = availableTag ?? (status.latestTag && status.latestTag !== status.version ? status.latestTag : null);
+  // badge comes only from a real update:available signal (record_check).
+  // btbN's rolling tag is "latest" while the installed version string is a
+  // build number — comparing them would show a permanent false badge.
+  const badge = availableTag ?? null;
 
   return (
     <>

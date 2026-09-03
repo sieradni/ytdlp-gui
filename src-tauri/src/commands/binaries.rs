@@ -5,7 +5,7 @@ use tauri::Emitter;
 
 use crate::binaries::manager::{self, BinaryManifest, InstallResult, ToolStatus};
 use crate::binaries::sources::{self, Tool};
-use crate::error::{other, AppResult};
+use crate::error::AppResult;
 
 /// `binariesStatus(): BinaryManifest` — what's installed, versions, staged
 /// swaps; `ready` gates the first-run wizard. also applies any swaps staged
@@ -33,12 +33,12 @@ pub async fn binaries_install(app: tauri::AppHandle) -> AppResult<Vec<InstallRes
 
 /// `binariesUpdate(tool)` — user-initiated only (D20: the UI never calls this
 /// automatically for ffmpeg; yt-dlp's scheduled check only sets a badge).
+/// the etag is deliberately NOT replayed here: `binaries_check_latest` just
+/// recorded it, and an explicit update click must never 304 into an error —
+/// it (re)fetches the release and reinstalls unconditionally.
 #[tauri::command]
 pub async fn binaries_update(app: tauri::AppHandle, tool: Tool) -> AppResult<InstallResult> {
-    let m = manager::load_manifest()?;
-    let previous = m.entry(tool).map(|e| (e.source.clone(), e.etag.clone()));
-    let prev_ref = previous.as_ref().map(|(s, e)| (s.as_str(), e.as_deref()));
-    manager::install_or_update(&app, tool, prev_ref).await
+    manager::install_or_update(&app, tool, None).await
 }
 
 /// `binariesCheckLatest(tool): LatestInfo` — one conditional github query.
@@ -50,9 +50,15 @@ pub async fn binaries_check_latest(app: tauri::AppHandle, tool: Tool) -> AppResu
     let previous = m.entry(tool).map(|e| (e.source.clone(), e.etag.clone()));
     let prev_ref = previous.as_ref().map(|(s, e)| (s.as_str(), e.as_deref()));
 
-    let rel = sources::latest_release(&client, tool, prev_ref)
-        .await?
-        .ok_or_else(|| other("already at the checked release (304)"))?;
+    // 304 = nothing newer since last check — a healthy result, not an error.
+    // single api call either way (unauthenticated github rate limit is 60/h).
+    let rel = match sources::latest_release(&client, tool, prev_ref).await? {
+        None => {
+            manager::touch_check(tool)?;
+            return Ok(manager::status(&manager::load_manifest()?).tool_status(tool));
+        }
+        Some(rel) => rel,
+    };
 
     let update_available = manager::record_check(tool, &rel)?.is_some();
     if update_available {

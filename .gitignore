@@ -10,9 +10,7 @@ gui.spec
 ytdlp_gui_config.json
 
 # node / vite — app build output is dist/app/ (v1's pyinstaller output lives in dist/gui/)
-dist/*
-!dist/gui/
-!dist/app/
+dist/
 node_modules
 dist-ssr
 *.local

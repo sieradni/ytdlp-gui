@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use tauri::Emitter;
 
 use crate::binaries::sources::{
-    self, http, latest_release, sha256_file, sha256_hex, LatestRelease, Tool,
+    self, http, latest_release, sha256_file, sha256_hex, sources_for, LatestRelease, Source, Tool,
 };
 use crate::error::{other, AppResult};
 
@@ -364,9 +364,16 @@ pub async fn install_or_update(
     let _ = std::fs::remove_file(&tmp);
 
     // ---- version ----
-    let version = detect_version(&dir.join(tool.files()[0]), tool)
-        .await
-        .unwrap_or_else(|| rel.tag.clone());
+    // when staged (old exe still locked in place), detect_version would read
+    // the OLD binary — record the release tag instead and let the next
+    // launch's post-swap status pick up the real `--version`.
+    let version = if staged {
+        rel.tag.clone()
+    } else {
+        detect_version(&dir.join(tool.files()[0]), tool)
+            .await
+            .unwrap_or_else(|| rel.tag.clone())
+    };
 
     // ---- manifest ----
     let mut m = load_manifest()?;
@@ -488,20 +495,45 @@ impl BinaryManifest {
 
 /// compare a fresh LatestRelease against the manifest and record the check
 /// (D42: lastChecked + etag + latestTag). returns `Some(new_tag)` when the
-/// release tag differs from the installed state (→ "update available").
+/// release differs from the installed state (→ "update available").
+///
+/// rolling sources (btbN's `latest`): the tag is constant, so change is
+/// signaled by the release etag instead — a new upload gets a fresh etag.
 pub fn record_check(tool: Tool, rel: &LatestRelease) -> AppResult<Option<String>> {
     let mut m = load_manifest()?;
     let entry = m.entry_mut(tool).get_or_insert_with(ToolEntry::default);
-    let update_available = entry
-        .latest_tag
-        .as_ref()
-        .map(|seen| seen != &rel.tag)
-        .unwrap_or(true);
+    let rolling = sources_for(tool)
+        .iter()
+        .find(|s| s.id == rel.source_id)
+        .is_some_and(Source::rolling);
+    let update_available = if rolling {
+        // rolling sources: the tag never changes ("latest"), so the release
+        // etag is the change signal. if the source omits etags entirely,
+        // change can't be detected — the badge stays off and `update`
+        // remains available on demand (D20 keeps it user-initiated anyway).
+        entry.latest_tag.as_deref() != Some(rel.tag.as_str())
+            || entry.etag.as_deref() != rel.etag.as_deref()
+    } else {
+        entry
+            .latest_tag
+            .as_ref()
+            .map(|seen| seen != &rel.tag)
+            .unwrap_or(true)
+    };
     entry.latest_tag = Some(rel.tag.clone());
     entry.etag = rel.etag.clone();
     entry.last_checked = Some(now_unix());
     save_manifest(&m)?;
     Ok(update_available.then(|| rel.tag.clone()))
+}
+
+/// 304 from a conditional check: nothing newer since last time. still bump
+/// `last_checked` so the settings card can show a fresh check time.
+pub fn touch_check(tool: Tool) -> AppResult<()> {
+    let mut m = load_manifest()?;
+    let entry = m.entry_mut(tool).get_or_insert_with(ToolEntry::default);
+    entry.last_checked = Some(now_unix());
+    save_manifest(&m)
 }
 
 #[cfg(test)]
