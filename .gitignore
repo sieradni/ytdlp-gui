@@ -1,0 +1,14 @@
+# IDE
+.idea/
+
+# Python
+__pycache__/
+*.pyc
+
+# PyInstaller
+build/
+dist/
+gui.spec
+
+# v1 runtime config (user state, not source)
+ytdlp_gui_config.json

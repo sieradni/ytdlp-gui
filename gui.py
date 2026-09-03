@@ -36,6 +36,7 @@ class YTDLPApp:
 
         self.config = load_config()
         self.is_downloading = False
+        self.is_updating = False
 
         # Create Tabbed layout
         self.notebook = ttk.Notebook(self.root)
@@ -191,6 +192,11 @@ class YTDLPApp:
                    command = lambda: self.save_settings(show_msg = True)).grid(row = 12, column = 1,
                                                                                pady = 30,
                                                                                sticky = 'e')
+
+        # 13. Update yt-dlp Button
+        self.btn_update_ytdlp = ttk.Button(self.tab_settings, text = "Update yt-dlp",
+                                           command = self.update_ytdlp)
+        self.btn_update_ytdlp.grid(row = 12, column = 0, padx = 10, pady = 30, sticky = 'w')
 
     def toggle_format_settings(self, event = None):
         """Enables or disables combo boxes based on whether Audio or Video is selected"""
@@ -372,6 +378,62 @@ class YTDLPApp:
             status = self.queue_tree.item(item, "values")[1]
             if status != "Downloading...":
                 self.queue_tree.delete(item)
+
+    # --- YT-DLP UPDATE LOGIC ---
+    def update_ytdlp(self):
+        """Runs `yt-dlp -U` so the executable updates itself."""
+        if self.is_updating:
+            return
+
+        ytdlp_path = self.path_ytdlp.get().strip()
+        if not ytdlp_path or not os.path.exists(ytdlp_path):
+            messagebox.showerror(
+                "Error",
+                "Please select a valid yt-dlp executable in the Configuration tab first.")
+            return
+
+        if self.is_downloading and not messagebox.askyesno(
+                "Download in Progress",
+                "A download is currently running. Update yt-dlp anyway?\n\n"
+                "(Already running downloads keep using the current version.)"):
+            return
+
+        self.is_updating = True
+        self.btn_update_ytdlp.config(state = 'disabled')
+
+        # Switch to the Downloads tab so the console output is visible
+        self.notebook.select(self.tab_downloads)
+        self.log_output("\n🔄 Checking for yt-dlp updates...\n")
+
+        threading.Thread(target = self.run_update, args = (ytdlp_path,), daemon = True).start()
+
+    def run_update(self, ytdlp_path):
+        try:
+            process = subprocess.Popen(
+                [ytdlp_path, "-U"],
+                stdout = subprocess.PIPE,
+                stderr = subprocess.STDOUT,
+                text = True,
+                encoding = 'utf-8',
+                errors = 'replace',
+                bufsize = 1
+            )
+
+            for line in process.stdout:
+                self.root.after(0, self.log_output, line)
+
+            process.wait()
+
+            if process.returncode == 0:
+                self.root.after(0, self.log_output, "\n✅ yt-dlp update check complete.\n")
+            else:
+                self.root.after(0, self.log_output,
+                                f"\n❌ Update failed (exit code {process.returncode}).\n")
+        except Exception as e:
+            self.root.after(0, self.log_output, f"System Error: {str(e)}\n")
+        finally:
+            self.is_updating = False
+            self.root.after(0, lambda: self.btn_update_ytdlp.config(state = 'normal'))
 
     # --- DOWNLOAD LOGIC ---
     def queue_urls(self):
