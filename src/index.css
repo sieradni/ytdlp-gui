@@ -1,0 +1,400 @@
+@import "tailwindcss";
+@import "./styles/tokens.css";
+
+/* ===== bundled cascadia mono (D13 — do not rely on system fonts) =====
+   SIL OFL 1.1, license shipped alongside (src/assets/fonts/LICENSE-CascadiaMono.txt). */
+@font-face {
+  font-family: "Cascadia Mono";
+  src: url("./assets/fonts/CascadiaMono-Variable.ttf") format("truetype");
+  font-weight: 400 700;
+  font-display: swap;
+}
+
+/* ===== base ===== */
+* {
+  box-sizing: border-box;
+}
+html,
+body,
+#root {
+  height: 100%;
+}
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.5;
+  overflow: hidden;
+  user-select: none;
+}
+::placeholder {
+  color: var(--faint);
+}
+input,
+textarea,
+select {
+  user-select: text;
+}
+
+/* ===== custom scrollbars — every scroll container (D23) ===== */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--bg-3) transparent;
+}
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: var(--bg-1);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--bg-3);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--amber);
+}
+
+/* ===== tab bar (D12: top tabs, amber underline, no sidebar) ===== */
+.tab-btn {
+  font-family: var(--mono);
+  font-size: 13px;
+  background: none;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0 14px;
+  height: 100%;
+  border-bottom: 2px solid transparent;
+}
+.tab-btn:hover {
+  color: var(--text);
+}
+.tab-btn.active {
+  color: var(--amber);
+  border-bottom-color: var(--amber);
+}
+
+/* ===== buttons ===== */
+.btn {
+  font-family: var(--mono);
+  font-size: 12px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--bg-2);
+  color: var(--text);
+  padding: 4px 11px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.btn:hover {
+  background: var(--bg-3);
+}
+.btn.primary {
+  background: var(--amber);
+  border-color: var(--amber);
+  color: #16110a;
+  font-weight: 700;
+}
+.btn.primary:hover {
+  filter: brightness(1.08);
+}
+.btn.ghost {
+  background: transparent;
+}
+.btn.ghost:hover {
+  background: var(--bg-2);
+}
+.btn.danger {
+  color: var(--red);
+}
+.btn.sm {
+  padding: 2px 8px;
+  font-size: 11.5px;
+}
+.btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* ===== inputs ===== */
+input[type="text"],
+select,
+textarea {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  color: var(--text);
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 5px 9px;
+  min-width: 0;
+  max-width: 100%;
+}
+input[type="text"]:focus,
+select:focus,
+textarea:focus {
+  outline: none;
+  border-color: var(--amber);
+}
+textarea {
+  width: 100%;
+  resize: vertical;
+  line-height: 1.5;
+}
+
+/* ===== segmented control ===== */
+.seg {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  flex-wrap: wrap;
+  max-width: 100%;
+}
+.seg button {
+  font-family: var(--mono);
+  font-size: 12px;
+  background: var(--bg-2);
+  color: var(--muted);
+  border: none;
+  padding: 4px 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.seg button.on {
+  background: var(--bg-3);
+  color: var(--amber);
+  font-weight: 700;
+}
+
+/* ===== toggle ===== */
+.toggle {
+  position: relative;
+  width: 30px;
+  height: 17px;
+  flex: none;
+  display: inline-block;
+}
+.toggle input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+  position: absolute;
+}
+.toggle .track {
+  position: absolute;
+  inset: 0;
+  background: var(--bg-3);
+  border-radius: 999px;
+  cursor: pointer;
+  transition: 0.12s;
+  display: block;
+}
+.toggle .track::after {
+  content: "";
+  position: absolute;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  top: 3px;
+  left: 3px;
+  background: var(--muted);
+  transition: 0.12s;
+}
+.toggle input:checked + .track {
+  background: var(--amber);
+}
+.toggle input:checked + .track::after {
+  left: 16px;
+  background: #16110a;
+}
+
+/* ===== cards ===== */
+.card {
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  margin-bottom: 12px;
+}
+.card-h {
+  display: flex;
+  align-items: center;
+  gap: 4px 12px;
+  flex-wrap: wrap;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.card-h h2 {
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--amber);
+  margin: 0;
+  letter-spacing: 0.02em;
+}
+.card-h .hint {
+  margin-left: auto;
+}
+.card-b {
+  padding: 10px 12px;
+}
+
+/* ===== text helpers ===== */
+.hint {
+  color: var(--faint);
+  font-size: 11px;
+}
+.warn {
+  color: var(--amber);
+  font-size: 11px;
+}
+.numm {
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+
+/* ===== form grid ===== */
+.fgrid {
+  display: grid;
+  grid-template-columns: 150px minmax(0, 1fr);
+  gap: 8px 12px;
+  align-items: center;
+}
+.fgrid label {
+  color: var(--text);
+  font-weight: 600;
+  font-size: 12px;
+}
+.fgrid > div {
+  min-width: 0;
+}
+.divider {
+  border-top: 1px solid var(--border);
+  margin: 10px -12px;
+}
+.nowrap {
+  white-space: nowrap;
+}
+
+/* ===== tables (queue/history) ===== */
+table {
+  border-collapse: collapse;
+  table-layout: fixed;
+  width: 100%;
+  max-width: 100%;
+}
+th {
+  text-align: left;
+  color: var(--faint);
+  font-weight: 700;
+  font-size: 11px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+  position: sticky;
+  top: 0;
+  background: var(--bg-1);
+  z-index: 2;
+}
+th:hover {
+  color: var(--muted);
+}
+th .dir {
+  color: var(--amber);
+  margin-left: 3px;
+}
+td {
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+tr:last-child td {
+  border-bottom: none;
+}
+tbody tr:hover {
+  background: rgba(255, 255, 255, 0.025);
+}
+.t-title {
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.t-meta {
+  color: var(--muted);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.idx {
+  color: var(--faint);
+  font-size: 11px;
+}
+
+/* ===== icon buttons (D29) ===== */
+.actions-cell {
+  text-align: right;
+  white-space: nowrap;
+}
+.iconbtn {
+  font-family: var(--mono);
+  background: none;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 14px;
+  padding: 4px 6px;
+  border-radius: 3px;
+  line-height: 1;
+}
+.iconbtn:hover {
+  background: var(--bg-3);
+  color: var(--text);
+}
+.iconbtn.danger:hover {
+  color: var(--red);
+}
+.chev {
+  color: var(--faint);
+  font-size: 11px;
+}
+
+/* ===== progress bar ===== */
+.progress {
+  height: 5px;
+  border-radius: 3px;
+  background: var(--bg-3);
+  overflow: hidden;
+}
+.progress > div {
+  height: 100%;
+  background: var(--amber);
+  border-radius: 3px;
+}
+
+@media (max-width: 820px) {
+  .fgrid {
+    grid-template-columns: 118px minmax(0, 1fr);
+  }
+  .card-h .hint {
+    display: none;
+  }
+}
+
+/* ===== reduced motion (M6 polish; cheap to respect now) ===== */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+  }
+}

@@ -1,0 +1,10 @@
+packages:
+  - "."
+
+onlyBuiltDependencies:
+  - esbuild
+
+# pnpm 11 runs a deps status check before `pnpm run`, spawning a nested
+# `pnpm` that corepack's cmd shim can't serve on windows. we keep deps
+# fresh ourselves instead.
+verifyDepsBeforeRun: false

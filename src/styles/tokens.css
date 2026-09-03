@@ -1,0 +1,23 @@
+/*
+ * v2 visual language — §6. single source of truth for the palette.
+ * alternates (nord-slate+cyan, rosé pine) stay future options via tokens only.
+ */
+:root {
+  --bg: #0d0f12;
+  --bg-1: #14171b;
+  --bg-2: #1c2127;
+  --bg-3: #262d35;
+  --border: #2b333c;
+  --text: #e8eaed;
+  --muted: #939ca8;
+  --faint: #626c78;
+  --amber: #e8a33d;
+  --amber-soft: rgba(232, 163, 61, 0.12);
+  --amber-border: rgba(232, 163, 61, 0.45);
+  --green: #3fb950;
+  --green-soft: rgba(63, 185, 80, 0.12);
+  --red: #e5534b;
+  --red-soft: rgba(229, 83, 75, 0.12);
+  --radius: 4px;
+  --mono: "Cascadia Mono", "JetBrains Mono", Consolas, "Courier New", monospace;
+}
