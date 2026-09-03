@@ -601,7 +601,10 @@ mod tests {
         let resolved = resolve_tool_path(&m, Tool::YtDlp).unwrap();
         assert_eq!(resolved, custom);
 
-        // missing custom file falls back to (absent) managed copy
+        // missing custom file falls back to the managed copy — which may
+        // legitimately exist on this machine (a real install via the
+        // wizard). assert the *contract*, not the absence: the managed
+        // path is returned, never the stale custom path.
         let m2 = Manifest {
             yt_dlp: Some(ToolEntry {
                 custom_path: Some(dir.join("nope.exe").to_string_lossy().into_owned()),
@@ -609,7 +612,13 @@ mod tests {
             }),
             ffmpeg: None,
         };
-        assert!(resolve_tool_path(&m2, Tool::YtDlp).is_none());
+        let resolved2 = resolve_tool_path(&m2, Tool::YtDlp);
+        let managed = bin_dir().join(Tool::YtDlp.files()[0]);
+        if managed.is_file() {
+            assert_eq!(resolved2, Some(managed));
+        } else {
+            assert_eq!(resolved2, None);
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

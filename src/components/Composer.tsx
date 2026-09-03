@@ -1,9 +1,18 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useQueue } from "../stores/queue";
 import { useSettings } from "../stores/settings";
 import type { AudioFormat, JobOptions, PlaylistMode } from "../lib/ipc";
 import { buildPreviewArgs, displayArgv } from "../lib/cmdPreview";
+import { defaultOptions } from "../lib/defaults";
+
+/**
+ * the composer's live options, mirrored module-level so history's
+ * re-download (D19: "what queue would do if I pasted this url now") can
+ * reuse exactly what the user currently sees configured — not stored
+ * per-history settings. falls back to defaults when home was never opened.
+ */
+export let currentOptions: JobOptions = defaultOptions();
 
 const FORMAT_NOTES: Partial<Record<AudioFormat, string>> = {
   best: "",
@@ -29,8 +38,13 @@ export default function Composer() {
   const add = useQueue((s) => s.add);
   const [urls, setUrls] = useState("");
   const [dest, setDest] = useState(settings.destination ?? "");
-  const [after, setAfter] = useState<"keep" | "move">("keep");
-  const [moveTarget, setMoveTarget] = useState("");
+  // settings load async — adopt the stored destination once it arrives,
+  // unless the user already typed a destination this session.
+  const [destTouched, setDestTouched] = useState(false);
+  useEffect(() => {
+    const stored = settings.destination;
+    if (!destTouched && stored && !dest) setDest(stored);
+  }, [settings.destination, destTouched, dest]);
   const [advOpen, setAdvOpen] = useState(false);
   const [feedback, setFeedback] = useState<{
     queued: number;
@@ -39,29 +53,14 @@ export default function Composer() {
   } | null>(null);
   const [copied, setCopied] = useState(false);
 
-  const [opts, setOpts] = useState<JobOptions>({
-    dlType: "audio",
-    audioFormat: "best",
-    coverMode: "square",
-    coverW: 640,
-    coverH: 640,
-    maxResolution: "best",
-    container: "mp4",
-    audioPref: "opus",
-    playlistMode: "single",
-    playlistN: 10,
-    skipDownloaded: true,
-    afterDownload: "keep",
-    moveTarget: null,
-    cookies: { kind: "none", browser: null, file: null },
-    subtitleLangs: [],
-    autoCaptions: false,
-    sponsorblock: [],
-    extraArgs: [],
-    outputTemplate: null,
-  });
+  const [opts, setOpts] = useState<JobOptions>({ ...defaultOptions(), cookies: { kind: "none", browser: null, file: null } });
 
-  const patch = (p: Partial<JobOptions>) => setOpts((o) => ({ ...o, ...p }));
+  const patch = (p: Partial<JobOptions>) =>
+    setOpts((o) => {
+      const next = { ...o, ...p };
+      currentOptions = next; // keep the D19 mirror in sync
+      return next;
+    });
 
   const urlCount = urls.split("\n").filter((l) => l.trim()).length;
   const note = opts.dlType === "audio" ? FORMAT_NOTES[opts.audioFormat] ?? "" : "";
@@ -125,7 +124,10 @@ export default function Composer() {
               type="text"
               className="grow"
               value={dest}
-              onChange={(e) => setDest(e.target.value)}
+              onChange={(e) => {
+                setDestTouched(true);
+                setDest(e.target.value);
+              }}
             />
             <button
               className="btn sm"
@@ -136,48 +138,6 @@ export default function Composer() {
             >
               …
             </button>
-          </div>
-
-          <label></label>
-          <div className="flex items-center gap-2 min-w-0">
-            <span className="hint nowrap">after download:</span>
-            <select
-              value={after}
-              onChange={(e) => {
-                const v = e.target.value as "keep" | "move";
-                setAfter(v);
-                patch({ afterDownload: v, moveTarget: v === "move" ? moveTarget || null : null });
-              }}
-              style={{ fontSize: 12 }}
-            >
-              <option value="keep">leave in destination</option>
-              <option value="move">move to…</option>
-            </select>
-            {after === "move" && (
-              <div className="flex items-center gap-2 grow min-w-0">
-                <input
-                  type="text"
-                  className="grow"
-                  value={moveTarget}
-                  onChange={(e) => {
-                    setMoveTarget(e.target.value);
-                    patch({ moveTarget: e.target.value });
-                  }}
-                />
-                <button
-                  className="btn sm"
-                  onClick={async () => {
-                    const picked = await pickFolder(moveTarget);
-                    if (picked) {
-                      setMoveTarget(picked);
-                      patch({ moveTarget: picked });
-                    }
-                  }}
-                >
-                  …
-                </button>
-              </div>
-            )}
           </div>
 
           <label>type</label>

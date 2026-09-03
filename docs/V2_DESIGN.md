@@ -60,6 +60,12 @@ with earlier text in this document, this log wins.
 | D45 | Metadata & formats | Everything D44 forgoes is recovered at runtime, not pre-flight: titles/formats parsed from yt-dlp's own output (`--print` / progress lines); hover card shows exactly what the engine knows at that moment. A later format listing is an additive `-J` on demand, never required for queueing. | Consistency with D44 without losing information |
 | D46 | Rolling sources (btbN) | BtbN's `latest` is a rolling release (tag literally "latest", assets re-uploaded daily), so tag comparison can never signal change; the **release etag is the change signal** for rolling sources. gyan assets are matched by `-essentials_build.zip` suffix (names embed the version tag). Never compare a tool tag against the installed version string in UI. | Verified live against the GitHub API (2026-09) |
 | D47 | check/update semantics | `check` = one conditional api call; 304 is a healthy "nothing newer" result (never surfaced as an error) and only bumps lastChecked. A recording check stores the etag, so **`update` never replays the etag** — an explicit click reinstalls unconditionally. When staged (locked exe), version records the release tag (detect_version would read the old binary); next launch's post-swap status picks up the real `--version`. | check→update 304 bug found in M2 review |
+| D48 | ffmpeg discovery by the engine | Every downloading job passes `--ffmpeg-location <bin-dir>` when the managed ffmpeg exists. Verified live (2026-09): yt-dlp already searches its **own directory** for ffmpeg, so the default layout (ffmpeg.exe adjacent to yt-dlp.exe) works without the flag — but a **custom yt-dlp path** (D40) pointing at a copy without its own ffmpeg would fail all post-processing. The flag closes that hole and is harmless otherwise. | M3 review + live E2E |
+| D49 | "move to…" cut from v2.0 | The after-download move UI was never functional (options existed in the type but `build_argv` consumed neither field). Rather than ship a dead control, **cut it**: downloads always stay in the destination, and history's 📁/locate… covers relocation afterward. Revisit as a real post-download move if a user asks. | M3 review: dead code beats fake feature |
+| D50 | Stop must kill the process **tree** | On Windows, `kill()` on yt-dlp alone leaves spawned ffmpeg/ffprobe alive holding the stdout/stderr pipes — the job never observes stream close and hangs in `downloading` forever. Stop uses `taskkill /T /F` (tree kill) with a plain kill fallback. | Found in M3 review |
+| D51 | Job ids are globally unique | `j<unix>-<seq>` collided across batches added within the same second; the second batch's inserts failed while their urls stayed marked in the in-memory set — un-retryable "ghost duplicates". Ids are now `j<unix>-<batch>-<seq>`. | Found in M3 review |
+| D52 | Re-download reads the live composer | D19's "current composer settings" is implemented literally: history's ↻ queues with the composer's current option state (module-level mirror) and lets `job_add` apply the stored destination; if home was never opened it falls back to defaults + stored destination. | M3 review: previous code always used defaults, violating D19 |
+| D53 | Within-playlist archive pre-check | The pre-resolution archive check only applies to single-video jobs. For playlist urls it is skipped — playlist expansion and per-item archive skipping are delegated to yt-dlp via the always-passed `--download-archive` (D41). Pre-checking a playlist id against the archive is meaningless (the playlist is never itself an archive entry). | M3 review |
 
 **Explicitly removed from the plan** (do not implement): theme switching, clipboard
 watching, minimize-to-tray, logo, presets editor, LogDrawer component (replaced by
@@ -343,9 +349,10 @@ hidden in modals in the primary flow; consistent all-monospace identity.
    - URLs textarea (multi-line). Lenient intake per §5.2; feedback card reports
      `n queued · n duplicates skipped · n invalid` with per-line reasons;
      accepted lines clear, invalid lines stay for fixing.
-   - **destination**: path input + folder-picker button; **after download**:
-     `leave in destination` / `move to…` (move target path input + picker button
-     revealed only when selected; hidden state reserves no space).
+   - **destination**: path input + folder-picker button. (The "after
+     download: move to…" control was cut — D49: never implemented, dead
+     surface. History's show-in-folder/locate… covers relocation after the
+     fact.)
    - **type**: audio | video segmented control; contextual rows:
      - audio → **convert to** (optgroup select per §5.2) + per-format note line
        (hidden entirely when empty, no phantom row) + **cover art**.

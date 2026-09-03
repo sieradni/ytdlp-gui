@@ -26,7 +26,7 @@ export function buildPreviewArgs(opts: JobOptions, dest: string, archive?: strin
   argv.push("-P", dest);
 
   if (opts.dlType === "audio") {
-    argv.push("-f", "ba", "-x");
+    argv.push("-f", "ba/b", "-x");
     if (opts.audioFormat !== "best") argv.push("--audio-format", opts.audioFormat);
     pushCover(argv, opts);
   } else {

@@ -2,8 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { historyImportArchive, historyList, historyRelink, jobAdd, type HistoryRow } from "../lib/ipc";
-import { useSettings } from "../stores/settings";
-import { defaultOptions } from "../lib/defaults";
+import { currentOptions } from "../components/Composer";
 
 function fmtSize(bytes: number | null): string {
   if (bytes == null) return "—";
@@ -35,7 +34,6 @@ export default function HistoryPage() {
   const [importMsg, setImportMsg] = useState<string | null>(null);
   /** rows whose file vanished (reveal failed) — offer locate… (§6) */
   const [moved, setMoved] = useState<Set<string>>(new Set());
-  const settings = useSettings((s) => s.settings);
 
   const load = useCallback(async (filter?: string) => {
     setRows(await historyList(filter));
@@ -82,10 +80,14 @@ export default function HistoryPage() {
 
   const reDownload = async (row: HistoryRow) => {
     if (!row.url) return;
-    // D19: re-download = new job with CURRENT composer settings + destination —
-    // "what queue would do if I pasted this url now". defaults mirror the
-    // composer's initial values.
-    await jobAdd([row.url], defaultOptions(), settings.destination ?? undefined);
+    // D19: re-download = new job with the composer's CURRENT options —
+    // "what queue would do if I pasted this url now". currentOptions is a
+    // module-level mirror that survives tab switches (pages unmount on
+    // switch, so a DOM probe would wrongly report "never opened home"); it
+    // holds defaults until the composer has rendered once. destination is
+    // resolved by job_add from the stored setting (or the os downloads dir).
+    await jobAdd([row.url], currentOptions);
+    await load(query || undefined);
   };
 
   return (

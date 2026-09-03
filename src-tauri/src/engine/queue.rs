@@ -18,6 +18,15 @@ use crate::engine::process;
 use crate::error::{other, AppResult};
 use crate::store::{archive_append, archive_contains, archive_path_from_settings, Db, JobRow};
 
+/// directory holding the app-managed ffmpeg (§4). passed to yt-dlp via
+/// `--ffmpeg-location` — the managed copy is not on PATH.
+fn ffmpeg_dir() -> Option<String> {
+    let dir = crate::binaries::manager::bin_dir().join("ffmpeg.exe");
+    dir.is_file()
+        .then(|| dir.parent().map(|p| p.to_string_lossy().into_owned()))
+        .flatten()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum JobState {
@@ -237,7 +246,15 @@ impl JobQueue {
                     }
 
                     let seq = jobs.len() + invalid.len() + dupes;
-                    let id = format!("j{now}-{seq:06}");
+                    // id must be unique across batches: j<unix>-<seq> alone
+                    // collides when two add_urls calls land in the same
+                    // second — the db insert then fails and the url stays
+                    // marked in `inner.urls` forever (an un-retryable ghost
+                    // "duplicate"). add a per-batch counter.
+                    static BATCH: std::sync::atomic::AtomicU64 =
+                        std::sync::atomic::AtomicU64::new(0);
+                    let batch = BATCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let id = format!("j{now}-{batch:06}-{seq:06}");
                     let row = JobRow {
                         id: id.clone(),
                         options: options_with_url(opts, &url),
@@ -469,12 +486,20 @@ impl JobQueue {
         };
 
         // ---- downloading ----
+        // the archive is passed even when the identity is known-new: within
+        // a playlist job yt-dlp itself skips ids the archive already holds
+        // (D41 — a half-downloaded playlist resumes where it left off).
         let archive_flag: Option<String> = if opts.skip_downloaded {
             Some(archive_path_from_settings().to_string_lossy().into_owned())
         } else {
             None
         };
-        let mut argv = match build_argv(&opts, &dest, archive_flag.as_deref()) {
+        let mut argv = match build_argv(
+            &opts,
+            &dest,
+            archive_flag.as_deref(),
+            ffmpeg_dir().as_deref(),
+        ) {
             Ok(a) => a,
             Err(e) => {
                 self.finalize(&id, JobState::Error, Some(e.to_string()))

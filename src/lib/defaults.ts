@@ -17,8 +17,6 @@ export function defaultOptions(): JobOptions {
     playlistMode: "single",
     playlistN: 10,
     skipDownloaded: true,
-    afterDownload: "keep",
-    moveTarget: null,
     cookies: { kind: "none", browser: null, file: null },
     subtitleLangs: [],
     autoCaptions: false,

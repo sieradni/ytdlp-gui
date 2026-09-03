@@ -15,7 +15,25 @@ pub struct Child {
 impl Child {
     /// kill the child (stop ■ semantics: keep .part files — killing the
     /// process is enough; yt-dlp leaves partials on disk).
+    ///
+    /// windows: `kill` alone terminates the process, but any piped stdout/
+    /// stderr reader task keeps waiting on a pipe whose write ends were held
+    /// by (now-dead) yt-dlp and its child ffmpeg — which are NOT in the job
+    /// object, so the pipe never closes and `rx.recv()` never returns. kill
+    /// with a `taskkill /T` fallback so the whole tree (yt-dlp + spawned
+    /// ffmpeg) dies and the streams close. without this, pressing ■ leaves
+    /// the job stuck in `downloading` forever.
     pub async fn kill(&mut self) {
+        #[cfg(windows)]
+        {
+            if let Some(pid) = self.inner.id() {
+                let _ = tokio::process::Command::new("taskkill")
+                    .args(["/PID", &pid.to_string(), "/T", "/F"])
+                    .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+                    .output()
+                    .await;
+            }
+        }
         let _ = self.inner.kill().await;
     }
 }

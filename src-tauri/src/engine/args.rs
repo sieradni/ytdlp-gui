@@ -106,8 +106,6 @@ pub struct JobOptions {
     pub playlist_mode: PlaylistMode,
     pub playlist_n: u32,
     pub skip_downloaded: bool,
-    pub after_download: AfterDownload,
-    pub move_target: Option<String>,
     pub cookies: CookieSource,
     /// subtitle languages, empty = none (D39).
     pub subtitle_langs: Vec<String>,
@@ -132,8 +130,6 @@ impl Default for JobOptions {
             playlist_mode: PlaylistMode::Single,
             playlist_n: 10,
             skip_downloaded: true,
-            after_download: AfterDownload::Keep,
-            move_target: None,
             cookies: CookieSource::default(),
             subtitle_langs: Vec::new(),
             auto_captions: false,
@@ -142,13 +138,6 @@ impl Default for JobOptions {
             output_template: None,
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum AfterDownload {
-    Keep,
-    Move,
 }
 
 /// engine-owned fixed flags (§5 invocation rules). always present.
@@ -166,10 +155,23 @@ const ENGINE_FLAGS: &[&str] = &[
 ];
 
 /// build the argv for one job. `archive` = Some(path) when skip-downloaded is
-/// on. `dest` is the download dir. argv[0] is the program name ("yt-dlp").
-pub fn build_argv(opts: &JobOptions, dest: &str, archive: Option<&str>) -> AppResult<Vec<String>> {
+/// on. `dest` is the download dir. `ffmpeg_dir` = Some(dir) points yt-dlp at
+/// the app-managed ffmpeg (M2's managed copy is not on PATH; without this
+/// every re-encode/remux/thumbnail job fails to find ffmpeg). argv[0] is the
+/// program name ("yt-dlp").
+pub fn build_argv(
+    opts: &JobOptions,
+    dest: &str,
+    archive: Option<&str>,
+    ffmpeg_dir: Option<&str>,
+) -> AppResult<Vec<String>> {
     let mut argv = vec!["yt-dlp".to_owned()];
     argv.extend(ENGINE_FLAGS.iter().map(|s| s.to_string()));
+
+    if let Some(dir) = ffmpeg_dir {
+        argv.push("--ffmpeg-location".into());
+        argv.push(dir.into());
+    }
 
     if let Some(arch) = archive {
         argv.push("--download-archive".into());
@@ -191,7 +193,11 @@ pub fn build_argv(opts: &JobOptions, dest: &str, archive: Option<&str>) -> AppRe
     match opts.dl_type {
         DlType::Audio => {
             argv.push("-f".into());
-            argv.push("ba".into());
+            // ba/b: bestaudio normally; fall back to best single-file when
+            // the source has no audio-only stream (generic direct mp4/mp3
+            // links, some bandcamp/soundcloud items). youtube etc. always
+            // hit the ba branch, so this only widens compatibility.
+            argv.push("ba/b".into());
             argv.push("-x".into());
             if opts.audio_format != AudioFormat::Best {
                 argv.push("--audio-format".into());
@@ -334,7 +340,7 @@ mod tests {
 
     #[test]
     fn audio_default_argv() {
-        let argv = build_argv(&base_audio(), r"C:\dl", None).unwrap();
+        let argv = build_argv(&base_audio(), r"C:\dl", None, None).unwrap();
         let s = argv.join(" ");
         assert!(s.contains("--newline"));
         assert!(s.contains("--progress"));
@@ -343,7 +349,7 @@ mod tests {
         assert!(s.contains("after_move:filepath"));
         assert!(s.contains("--no-playlist"));
         assert!(s.contains(r"-P C:\dl"));
-        assert!(s.contains("-f ba"));
+        assert!(s.contains("-f ba/b"));
         assert!(s.contains("-x"));
         assert!(s.contains("--embed-metadata"));
         // no conversion when Best
@@ -358,7 +364,7 @@ mod tests {
         let mut o = base_audio();
         o.audio_format = AudioFormat::Flac;
         o.skip_downloaded = true;
-        let argv = build_argv(&o, r"C:\dl", Some(r"C:\arch\downloaded.txt")).unwrap();
+        let argv = build_argv(&o, r"C:\dl", Some(r"C:\arch\downloaded.txt"), None).unwrap();
         let s = argv.join(" ");
         assert!(s.contains("--audio-format flac"));
         assert!(s.contains(r"--download-archive C:\arch\downloaded.txt"));
@@ -372,7 +378,7 @@ mod tests {
         o.audio_pref = VideoAudioPref::Aac;
         o.container = VideoContainer::Mkv;
         o.cover_mode = CoverMode::None;
-        let argv = build_argv(&o, r"C:\dl", None).unwrap();
+        let argv = build_argv(&o, r"C:\dl", None, None).unwrap();
         let s = argv.join(" ");
         assert!(
             s.contains("-f bv*[height<=1080]+ba[ext=m4a]/bv*[height<=1080]+ba/b[height<=1080]/b")
@@ -386,7 +392,7 @@ mod tests {
         let mut o = base_audio();
         o.dl_type = DlType::Video;
         o.cover_mode = CoverMode::None;
-        let argv = build_argv(&o, r"C:\dl", None).unwrap();
+        let argv = build_argv(&o, r"C:\dl", None, None).unwrap();
         let s = argv.join(" ");
         assert!(s.contains("-f bv*+ba/bv*+ba/b"));
     }
@@ -395,13 +401,13 @@ mod tests {
     fn playlist_modes() {
         let mut o = base_audio();
         o.playlist_mode = PlaylistMode::All;
-        assert!(!build_argv(&o, "d", None)
+        assert!(!build_argv(&o, "d", None, None)
             .unwrap()
             .iter()
             .any(|a| a.contains("playlist")));
         o.playlist_mode = PlaylistMode::FirstN;
         o.playlist_n = 25;
-        let argv = build_argv(&o, "d", None).unwrap();
+        let argv = build_argv(&o, "d", None, None).unwrap();
         let i = argv.iter().position(|a| a == "--playlist-end").unwrap();
         assert_eq!(argv[i + 1], "25");
     }
@@ -413,7 +419,7 @@ mod tests {
         o.dl_type = DlType::Video;
         o.container = VideoContainer::Webm;
         o.cover_mode = CoverMode::None;
-        let argv = build_argv(&o, "d", None).unwrap();
+        let argv = build_argv(&o, "d", None, None).unwrap();
         assert!(argv.contains(&"--merge-output-format".to_owned()));
         assert!(argv.contains(&"webm".to_owned()));
     }
@@ -432,7 +438,7 @@ mod tests {
         o.sponsorblock = vec!["sponsor".into(), "intro".into()];
         o.extra_args = vec!["--verbose".into()];
         o.output_template = Some("%(title)s [%(id)s].%(ext)s".into());
-        let argv = build_argv(&o, "d", None).unwrap();
+        let argv = build_argv(&o, "d", None, None).unwrap();
         let s = argv.join(" ");
         assert!(s.contains("--cookies-from-browser firefox"));
         assert!(s.contains("--sub-langs en,de"));
@@ -449,7 +455,7 @@ mod tests {
         o.cover_mode = CoverMode::Custom;
         o.cover_w = 800;
         o.cover_h = 450;
-        let argv = build_argv(&o, "d", None).unwrap();
+        let argv = build_argv(&o, "d", None, None).unwrap();
         assert!(argv
             .join(" ")
             .contains("ThumbnailsConvertor+ffmpeg_o:-c:v png -vf scale=800:450"));
@@ -460,7 +466,7 @@ mod tests {
         let mut o = base_audio();
         o.cover_mode = CoverMode::Custom;
         o.cover_w = 0;
-        assert!(build_argv(&o, "d", None).is_err());
+        assert!(build_argv(&o, "d", None, None).is_err());
     }
 
     #[test]
@@ -468,8 +474,20 @@ mod tests {
         let mut o = base_audio();
         o.playlist_mode = PlaylistMode::FirstN;
         o.playlist_n = 0;
-        let argv = build_argv(&o, "d", None).unwrap();
+        let argv = build_argv(&o, "d", None, None).unwrap();
         let i = argv.iter().position(|a| a == "--playlist-end").unwrap();
         assert_eq!(argv[i + 1], "1");
+    }
+
+    #[test]
+    fn ffmpeg_location_points_yt_dlp_at_managed_ffmpeg() {
+        // regression: the managed ffmpeg is not on PATH — without
+        // --ffmpeg-location every re-encode/remux/thumbnail job fails.
+        let argv = build_argv(&base_audio(), r"C:\dl", None, Some(r"C:\bin")).unwrap();
+        let s = argv.join(" ");
+        assert!(s.contains(r"--ffmpeg-location C:\bin"));
+        // absent managed ffmpeg → no flag (custom yt-dlp may find its own)
+        let argv2 = build_argv(&base_audio(), r"C:\dl", None, None).unwrap();
+        assert!(!argv2.join(" ").contains("--ffmpeg-location"));
     }
 }

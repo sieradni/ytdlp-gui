@@ -106,10 +106,6 @@ export interface CookieSource {
   file: string | null;
 }
 
-export interface AfterDownload {
-  keep: true;
-} // unused placeholder to keep option names aligned
-
 export interface JobOptions {
   dlType: DlType;
   audioFormat: AudioFormat;
@@ -122,8 +118,6 @@ export interface JobOptions {
   playlistMode: PlaylistMode;
   playlistN: number;
   skipDownloaded: boolean;
-  afterDownload: "keep" | "move";
-  moveTarget: string | null;
   cookies: CookieSource;
   subtitleLangs: string[];
   autoCaptions: boolean;
