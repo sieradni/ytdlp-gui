@@ -177,6 +177,8 @@ export const useQueue = create<QueueState>((set, get) => ({
                   finalPath: p.finalPath ?? j.finalPath,
                   error: "error" in p ? (p.error ?? null) : j.error,
                   skipped: p.skipped ?? j.skipped,
+                  itemsDone: "itemsDone" in p ? (p.itemsDone ?? null) : j.itemsDone,
+                  itemsTotal: "itemsTotal" in p ? (p.itemsTotal ?? null) : j.itemsTotal,
                 }
               : j,
           ),

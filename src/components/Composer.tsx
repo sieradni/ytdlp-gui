@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useQueue } from "../stores/queue";
 import { useSettings } from "../stores/settings";
-import type { AudioFormat, JobOptions, PlaylistMode } from "../lib/ipc";
+import { migrationStatus, type AudioFormat, type JobOptions, type PlaylistMode } from "../lib/ipc";
 import { buildPreviewArgs, displayArgv } from "../lib/cmdPreview";
 import { defaultOptions } from "../lib/defaults";
 
@@ -59,8 +59,24 @@ export default function Composer() {
     setOpts((o) => {
       const next = { ...o, ...p };
       currentOptions = next; // keep the D19 mirror in sync
+      touched.current = true;
       return next;
     });
+
+  // §11 migration: once, on mount, adopt the migrated v1 composer defaults —
+  // but never after the user has touched a control this session.
+  const touched = useRef(false);
+  useEffect(() => {
+    void migrationStatus().then((report) => {
+      if (!report?.migratedOptions || touched.current) return;
+      setOpts((o) => {
+        const next = { ...o, ...report.migratedOptions! };
+        currentOptions = next;
+        return next;
+      });
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const urlCount = urls.split("\n").filter((l) => l.trim()).length;
   const note = opts.dlType === "audio" ? FORMAT_NOTES[opts.audioFormat] ?? "" : "";

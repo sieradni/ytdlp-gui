@@ -30,6 +30,12 @@ pub struct JobRow {
     /// duplicate-skip marker (§5.2): done without side effects.
     #[serde(default)]
     pub skipped: bool,
+    /// playlist progress (D33): items done / total for the running job.
+    /// null for single-video jobs (or older yt-dlp that prints no counter).
+    #[serde(default)]
+    pub items_done: Option<u32>,
+    #[serde(default)]
+    pub items_total: Option<u32>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -65,6 +71,8 @@ CREATE TABLE IF NOT EXISTS jobs (
   eta_sec INTEGER,
   error TEXT,
   skipped INTEGER NOT NULL DEFAULT 0,
+  items_done INTEGER,
+  items_total INTEGER,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
@@ -91,6 +99,7 @@ impl Db {
         }
         let conn = Connection::open(path)?;
         conn.execute_batch(SCHEMA)?;
+        ensure_columns(&conn);
         Ok(Db(Mutex::new(conn)))
     }
 
@@ -98,6 +107,7 @@ impl Db {
     pub fn open_in_memory() -> AppResult<Self> {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch(SCHEMA)?;
+        ensure_columns(&conn);
         Ok(Db(Mutex::new(conn)))
     }
 
@@ -109,12 +119,13 @@ impl Db {
 
     pub fn insert_job(&self, j: &JobRow) -> AppResult<()> {
         self.conn().execute(
-            "INSERT INTO jobs (id, options, dest, state, title, format, final_path, pct, speed_bps, eta_sec, error, skipped, created_at, updated_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+            "INSERT INTO jobs (id, options, dest, state, title, format, final_path, pct, speed_bps, eta_sec, error, skipped, items_done, items_total, created_at, updated_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
             rusqlite::params![
                 j.id, j.options, j.dest, j.state, j.title, j.format, j.final_path,
                 j.pct, j.speed_bps, j.eta_sec.map(|v| v as i64), j.error,
-                j.skipped as i64, j.created_at, j.updated_at
+                j.skipped as i64, j.items_done.map(|v| v as i64), j.items_total.map(|v| v as i64),
+                j.created_at, j.updated_at
             ],
         )?;
         Ok(())
@@ -122,11 +133,12 @@ impl Db {
 
     pub fn update_job(&self, id: &str, j: &JobRow) -> AppResult<()> {
         self.conn().execute(
-            "UPDATE jobs SET options=?2, dest=?3, state=?4, title=?5, format=?6, final_path=?7, pct=?8, speed_bps=?9, eta_sec=?10, error=?11, skipped=?12, updated_at=?13 WHERE id=?1",
+            "UPDATE jobs SET options=?2, dest=?3, state=?4, title=?5, format=?6, final_path=?7, pct=?8, speed_bps=?9, eta_sec=?10, error=?11, skipped=?12, items_done=?13, items_total=?14, updated_at=?15 WHERE id=?1",
             rusqlite::params![
                 id, j.options, j.dest, j.state, j.title, j.format, j.final_path,
                 j.pct, j.speed_bps, j.eta_sec.map(|v| v as i64), j.error,
-                j.skipped as i64, j.updated_at
+                j.skipped as i64, j.items_done.map(|v| v as i64), j.items_total.map(|v| v as i64),
+                j.updated_at
             ],
         )?;
         Ok(())
@@ -136,7 +148,7 @@ impl Db {
     pub fn list_jobs(&self) -> AppResult<Vec<JobRow>> {
         let conn = self.conn();
         let mut stmt = conn.prepare(
-            "SELECT id, options, dest, state, title, format, final_path, pct, speed_bps, eta_sec, error, skipped, created_at, updated_at
+            "SELECT id, options, dest, state, title, format, final_path, pct, speed_bps, eta_sec, error, skipped, items_done, items_total, created_at, updated_at
              FROM jobs ORDER BY created_at ASC, rowid ASC",
         )?;
         let rows = stmt
@@ -263,8 +275,10 @@ fn row_to_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<JobRow> {
         eta_sec: row.get::<_, Option<i64>>(9)?.map(|v| v.max(0) as u64),
         error: row.get(10)?,
         skipped: row.get::<_, i64>(11)? != 0,
-        created_at: row.get(12)?,
-        updated_at: row.get(13)?,
+        items_done: row.get::<_, Option<i64>>(12)?.map(|v| v.max(0) as u32),
+        items_total: row.get::<_, Option<i64>>(13)?.map(|v| v.max(0) as u32),
+        created_at: row.get(14)?,
+        updated_at: row.get(15)?,
     })
 }
 
@@ -293,6 +307,39 @@ pub fn now_unix() -> i64 {
 
 pub fn db_path() -> std::path::PathBuf {
     crate::binaries::manager::app_data_dir().join("history.db")
+}
+
+/// columns added after the schema first shipped (m4): ALTER TABLE for
+/// databases created by older builds. CREATE TABLE IF NOT EXISTS above
+/// covers fresh installs; this covers the in-place upgrade path.
+fn ensure_columns(conn: &Connection) {
+    let existing: std::collections::HashSet<String> = {
+        let mut stmt = conn
+            .prepare("SELECT name FROM pragma_table_info('jobs')")
+            .expect("pragma jobs");
+        let names = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .expect("pragma query")
+            .filter_map(Result::ok)
+            .collect();
+        names
+    };
+    for (col, ddl) in [
+        (
+            "items_done",
+            "ALTER TABLE jobs ADD COLUMN items_done INTEGER",
+        ),
+        (
+            "items_total",
+            "ALTER TABLE jobs ADD COLUMN items_total INTEGER",
+        ),
+    ] {
+        if !existing.contains(col) {
+            if let Err(e) = conn.execute_batch(ddl) {
+                eprintln!("history.db: adding column {col} failed: {e}");
+            }
+        }
+    }
 }
 
 /// does the archive file contain `<extractor> <vid>`? (D17: downloaded.txt is
@@ -355,6 +402,8 @@ mod tests {
             eta_sec: None,
             error: None,
             skipped: false,
+            items_done: None,
+            items_total: None,
             created_at: 1,
             updated_at: 1,
         }
@@ -484,6 +533,56 @@ mod tests {
         assert_eq!(text.lines().count(), 2);
         assert!(archive_contains(&p, "youtube", "abc"));
         assert!(!archive_contains(&p, "youtube", "zzz"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn job_counter_columns_roundtrip() {
+        // m4: items_done/items_total — insert + update + read back
+        let db = Db::open_in_memory().unwrap();
+        let mut j = job("c", "downloading");
+        j.items_done = Some(3);
+        j.items_total = Some(12);
+        db.insert_job(&j).unwrap();
+        let got = db.list_jobs().unwrap().remove(0);
+        assert_eq!((got.items_done, got.items_total), (Some(3), Some(12)));
+
+        j.items_done = Some(4);
+        db.update_job("c", &j).unwrap();
+        let got = db.list_jobs().unwrap().remove(0);
+        assert_eq!(got.items_done, Some(4));
+        assert_eq!(got.items_total, Some(12));
+    }
+
+    #[test]
+    fn ensure_columns_upgrades_pre_m4_databases() {
+        // simulate a database created before items_done/items_total existed:
+        // create the old-schema table, then open through Db::open and verify
+        // the counter columns work.
+        let dir = std::env::temp_dir().join(format!("yg-mig-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("history.db");
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE jobs (
+                    id TEXT PRIMARY KEY, options TEXT NOT NULL, dest TEXT NOT NULL,
+                    state TEXT NOT NULL, title TEXT, format TEXT, final_path TEXT,
+                    pct REAL, speed_bps REAL, eta_sec INTEGER, error TEXT,
+                    skipped INTEGER NOT NULL DEFAULT 0,
+                    created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+                );",
+            )
+            .unwrap();
+        }
+        let db = Db::open(&path).unwrap();
+        let mut j = job("old", "queued");
+        j.items_done = Some(1);
+        j.items_total = Some(5);
+        db.insert_job(&j).unwrap();
+        let got = db.list_jobs().unwrap().remove(0);
+        assert_eq!((got.items_done, got.items_total), (Some(1), Some(5)));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

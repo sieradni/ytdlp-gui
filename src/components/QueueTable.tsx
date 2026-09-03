@@ -159,7 +159,13 @@ function Row({ job, index }: { job: Job; index: number }) {
             <div className="progress" style={{ flex: 1 }}>
               <div style={{ width: `${job.pct ?? 0}%` }} />
             </div>
-            <span className="numm">{job.pct != null ? `${Math.round(job.pct)}%` : "—"}</span>
+            <span className="numm">
+              {job.itemsTotal != null
+                ? `${job.itemsDone ?? 0}/${job.itemsTotal}`
+                : job.pct != null
+                  ? `${Math.round(job.pct)}%`
+                  : "—"}
+            </span>
           </div>
         </td>
         <td className="numm">{fmtSpeed(job.speedBps) || "—"}</td>

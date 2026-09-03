@@ -1,6 +1,12 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { binariesInstall, binariesSetCustomPath, type Tool } from "../lib/ipc";
+import {
+  binariesInstall,
+  binariesSetCustomPath,
+  migrationStatus,
+  type MigrationReport,
+  type Tool,
+} from "../lib/ipc";
 import { useBinaries } from "../stores/binaries";
 import { useSettings } from "../stores/settings";
 
@@ -14,7 +20,17 @@ export default function FirstRunWizard() {
   const { wizardOpen, setWizardOpen, setBusy, refresh } = useBinaries();
   const [phase, setPhase] = useState<"detect" | "downloading" | "done" | "error">("detect");
   const [error, setError] = useState<string | null>(null);
+  const [doneMsg, setDoneMsg] = useState("✓ installed and verified");
+  const [v1, setV1] = useState<MigrationReport | null>(null);
   const progress = useBinaries((s) => s.progress);
+
+  // §11: the migration may have found v1 binaries — offer them here as the
+  // custom-binary alternative to downloading (D40), never auto-applied.
+  useEffect(() => {
+    void migrationStatus().then((r) => {
+      if (r && (r.v1YtDlpPath || r.v1FfmpegPath)) setV1(r);
+    });
+  }, []);
 
   if (!wizardOpen) return null;
 
@@ -26,6 +42,7 @@ export default function FirstRunWizard() {
     try {
       await binariesInstall();
       await refresh();
+      setDoneMsg("✓ installed and verified");
       setPhase("done");
       // auto-dismiss shortly after success
       setTimeout(() => {
@@ -38,6 +55,15 @@ export default function FirstRunWizard() {
     } finally {
       setBusy(null);
     }
+  };
+
+  const useV1Copies = async () => {
+    if (!v1) return;
+    if (v1.v1YtDlpPath) await binariesSetCustomPath("yt-dlp", v1.v1YtDlpPath);
+    if (v1.v1FfmpegPath) await binariesSetCustomPath("ffmpeg", v1.v1FfmpegPath);
+    await refresh();
+    setDoneMsg("✓ using your v1 copies — managed updates off (D40)");
+    setPhase("done");
   };
 
   const useOwn = async (tool: Tool) => {
@@ -94,6 +120,29 @@ export default function FirstRunWizard() {
                 >
                   later
                 </button>
+              {v1 && (v1.v1YtDlpPath || v1.v1FfmpegPath) && (
+                <div
+                  className="row"
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8,
+                    flexWrap: "wrap",
+                    marginTop: 10,
+                    paddingTop: 8,
+                    borderTop: "1px solid var(--border)",
+                  }}
+                >
+                  <span className="hint" style={{ overflowWrap: "anywhere" }}>
+                    found your v1 setup{v1.droppedKeys.length === 0 ? "" : " (some options unmapped)"}:
+                    {v1.v1YtDlpPath ? " yt-dlp ✓" : ""}
+                    {v1.v1FfmpegPath ? " ffmpeg ✓" : ""}
+                  </span>
+                  <button className="btn sm" onClick={() => void useV1Copies()}>
+                    use v1 copies
+                  </button>
+                </div>
+              )}
               </div>
             </>
           )}
@@ -127,7 +176,7 @@ export default function FirstRunWizard() {
           )}
 
           {phase === "done" && (
-            <p style={{ color: "var(--green)", fontSize: 12 }}>✓ installed and verified</p>
+            <p style={{ color: "var(--green)", fontSize: 12 }}>{doneMsg}</p>
           )}
 
           {phase === "error" && (

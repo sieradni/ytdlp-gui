@@ -78,6 +78,19 @@ pub fn app_paths() -> AppPaths {
 }
 
 // ---------------------------------------------------------------------------
+// migration status (§11): what the v1 migration found at this launch — the
+// wizard offers the v1 binaries as custom copies; the composer adopts the
+// migrated defaults. None when no v1 config exists.
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub fn migration_status(
+    state: tauri::State<'_, Option<crate::migrate::MigrationReport>>,
+) -> Option<crate::migrate::MigrationReport> {
+    state.inner().clone()
+}
+
+// ---------------------------------------------------------------------------
 // appVersion (§7)
 // ---------------------------------------------------------------------------
 

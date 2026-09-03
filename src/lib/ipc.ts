@@ -152,6 +152,9 @@ export interface Job {
   etaSec: number | null;
   error: string | null;
   skipped: boolean;
+  /** playlist progress (D33): items done / total; null for single videos */
+  itemsDone: number | null;
+  itemsTotal: number | null;
   output: string[];
   createdAt: number;
 }
@@ -218,6 +221,22 @@ export interface AppPaths {
 }
 
 export const appPaths = () => invoke<AppPaths>("app_paths");
+
+// ---------------------------------------------------------------------------
+// v1 migration (§11, D43) — what this launch's one-shot migration found
+// ---------------------------------------------------------------------------
+
+export interface MigrationReport {
+  configApplied: boolean;
+  droppedKeys: string[];
+  historySeeded: number;
+  archivePath: string | null;
+  v1YtDlpPath: string | null;
+  v1FfmpegPath: string | null;
+  migratedOptions: JobOptions | null;
+}
+
+export const migrationStatus = () => invoke<MigrationReport | null>("migration_status");
 
 export interface AppVersions {
   app: string;

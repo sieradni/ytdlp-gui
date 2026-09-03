@@ -89,6 +89,10 @@ pub struct Job {
     pub eta_sec: Option<u64>,
     pub error: Option<String>,
     pub skipped: bool,
+    /// playlist progress (D33): items done / total. null = single video or
+    /// no counter line seen yet.
+    pub items_done: Option<u32>,
+    pub items_total: Option<u32>,
     /// recent output lines for the expandable row (§6).
     pub output: Vec<String>,
     pub created_at: i64,
@@ -108,6 +112,8 @@ impl Job {
             eta_sec: row.eta_sec,
             error: row.error.clone(),
             skipped: row.skipped,
+            items_done: row.items_done,
+            items_total: row.items_total,
             output,
             created_at: row.created_at,
         }
@@ -268,6 +274,8 @@ impl JobQueue {
                         eta_sec: None,
                         error: None,
                         skipped: false,
+                        items_done: None,
+                        items_total: None,
                         created_at: now,
                         updated_at: now,
                     };
@@ -528,7 +536,12 @@ impl JobQueue {
             RunOutcome::Error(msg) => {
                 self.finalize(&id, JobState::Error, Some(msg)).await;
             }
-            RunOutcome::Done { final_path, title } => {
+            RunOutcome::Done {
+                final_path,
+                title,
+                items_done,
+                items_total,
+            } => {
                 // engine archive-write rule (§5.2): the engine appends
                 // `<extractor> <id>` itself after success — idempotent, so
                 // archive/history/file can't drift when yt-dlp errors late.
@@ -562,6 +575,10 @@ impl JobQueue {
                 row.pct = Some(100.0);
                 row.speed_bps = None;
                 row.eta_sec = None;
+                // final playlist counts (D33) — write them unconditionally so
+                // the throttled db flush can never lose the last item.
+                row.items_done = items_done.or(row.items_done);
+                row.items_total = items_total.or(row.items_total);
                 if final_path.is_some() {
                     row.final_path = final_path;
                 }
@@ -600,6 +617,11 @@ impl JobQueue {
         let mut title: Option<String> = None;
         let mut last_emit = std::time::Instant::now();
         let mut last_db = std::time::Instant::now();
+        // playlist progress (D33): total from the counter line, done counted
+        // from item starts (monotonic — archive-skipped items count too).
+        let mut items_done: u32 = 0;
+        let mut items_total: Option<u32> = None;
+        let mut last_items_db = std::time::Instant::now();
 
         loop {
             tokio::select! {
@@ -611,8 +633,14 @@ impl JobQueue {
                     let Some((_is_stdout, raw)) = line else {
                         // both streams closed — reap the exit status
                         let status = child.inner.wait().await;
+                        let items_done = (items_done > 0).then_some(items_done);
                         return match status {
-                            Ok(s) if s.success() => RunOutcome::Done { final_path, title },
+                            Ok(s) if s.success() => RunOutcome::Done {
+                                final_path,
+                                title,
+                                items_done,
+                                items_total,
+                            },
                             Ok(s) => RunOutcome::Error(
                                 last_error.unwrap_or_else(|| format!("yt-dlp exited with {s}")),
                             ),
@@ -673,7 +701,43 @@ impl JobQueue {
                         ParsedLine::FinalPath(p) => {
                             final_path = Some(p);
                         }
-                        ParsedLine::Destination(_) | ParsedLine::ItemStart { .. } => {}
+                        ParsedLine::PlaylistCounter { done: _, total } => {
+                            // counter's N is the item being fetched now; items
+                            // done comes from our own count, total from here.
+                            items_total = Some(total);
+                            if last_emit.elapsed().as_millis() >= 200 {
+                                last_emit = std::time::Instant::now();
+                                let _ = self.app.emit(
+                                    "job:update",
+                                    serde_json::json!({
+                                        "id": id, "state": "downloading",
+                                        "itemsDone": items_done, "itemsTotal": total,
+                                    }),
+                                );
+                            }
+                        }
+                        ParsedLine::ItemStart { .. } => {
+                            items_done = items_done.saturating_add(1);
+                            if last_emit.elapsed().as_millis() >= 200 {
+                                last_emit = std::time::Instant::now();
+                                let _ = self.app.emit(
+                                    "job:update",
+                                    serde_json::json!({
+                                        "id": id, "state": "downloading",
+                                        "itemsDone": items_done, "itemsTotal": items_total,
+                                    }),
+                                );
+                            }
+                            if last_items_db.elapsed().as_millis() >= 500 {
+                                last_items_db = std::time::Instant::now();
+                                let mut row = self.row(id);
+                                row.items_done = Some(items_done);
+                                row.items_total = items_total;
+                                row.updated_at = crate::store::now_unix();
+                                self.save_row(&row);
+                            }
+                        }
+                        ParsedLine::Destination(_) => {}
                         ParsedLine::Stage("post") => {
                             self.set_state(id, JobState::Post).await;
                         }
@@ -712,6 +776,8 @@ impl JobQueue {
                 eta_sec: None,
                 error: None,
                 skipped: false,
+                items_done: None,
+                items_total: None,
                 created_at: 0,
                 updated_at: 0,
             })
@@ -797,6 +863,10 @@ enum RunOutcome {
     Done {
         final_path: Option<String>,
         title: Option<String>,
+        /// final playlist counts (D33) — flushed once at completion so the
+        /// last item is never lost to the throttled 500 ms db write.
+        items_done: Option<u32>,
+        items_total: Option<u32>,
     },
     Stopped,
     Error(String),

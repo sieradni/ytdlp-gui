@@ -22,6 +22,9 @@ pub enum ParsedLine {
     Title(String),
     /// a playlist item started: `[download] <id>: ...` destination lines.
     ItemStart { id: String },
+    /// yt-dlp's playlist counter: `[download] Downloading item 3 of 12`.
+    /// authoritative for the total; items done are counted from ItemStart.
+    PlaylistCounter { done: u32, total: u32 },
     /// destination line: `Destination: …` / `[Merger] …` (post-processing).
     Destination(String),
     /// fragment/stream stage line that still counts as downloading.
@@ -51,6 +54,21 @@ pub fn parse_line(raw: &str) -> ParsedLine {
     // ---- --print after_move:filepath output (bare path line) ----
     if looks_like_path(t) {
         return ParsedLine::FinalPath(t.to_owned());
+    }
+
+    // ---- playlist counter: `[download] Downloading item N of M` ----
+    if let Some(rest) = t.strip_prefix("[download] Downloading item ") {
+        let mut it = rest.split_whitespace();
+        // "N of M"
+        let done = it.next().and_then(|v| v.parse::<u32>().ok());
+        let total = it
+            .next()
+            .filter(|w| *w == "of")
+            .and_then(|_| it.next())
+            .and_then(|v| v.parse::<u32>().ok());
+        if let (Some(done), Some(total)) = (done, total) {
+            return ParsedLine::PlaylistCounter { done, total };
+        }
     }
 
     // ---- [download] Destination: / [Merger] / [ExtractAudio] etc ----
@@ -246,6 +264,34 @@ mod tests {
     fn item_start_vs_progress() {
         match parse_line("[download] abc123def45: Sunset Timelapse 4K") {
             ParsedLine::ItemStart { id } => assert_eq!(id, "abc123def45"),
+            other => panic!("wrong parse: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn playlist_counter_line() {
+        match parse_line("[download] Downloading item 3 of 12") {
+            ParsedLine::PlaylistCounter { done, total } => {
+                assert_eq!((done, total), (3, 12));
+            }
+            other => panic!("wrong parse: {other:?}"),
+        }
+        // malformed counters stay plain lines, never mis-parse
+        assert!(matches!(
+            parse_line("[download] Downloading item x of 12"),
+            ParsedLine::Line(_)
+        ));
+        assert!(matches!(
+            parse_line("[download] Downloading item 3 of"),
+            ParsedLine::Line(_) | ParsedLine::ItemStart { .. }
+        ));
+    }
+
+    #[test]
+    fn archive_skip_line_reads_as_item_start() {
+        // skipped items are "processed" for items-done counting (D33)
+        match parse_line("[download] abc123: Has already been recorded in the archive") {
+            ParsedLine::ItemStart { id } => assert_eq!(id, "abc123"),
             other => panic!("wrong parse: {other:?}"),
         }
     }

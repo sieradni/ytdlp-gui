@@ -16,9 +16,13 @@ pub struct ResolvedIdentity {
     pub title: Option<String>,
 }
 
-/// process-wide memo: url → resolved identity (or sticky error).
+/// process-wide memo: url → resolved identity (or sticky error). capped
+/// (m3-review flag): this is a per-session network saver, not a correctness
+/// mechanism — identity dedupe (D18) works on the resolved pair regardless.
 #[derive(Default)]
 pub struct Memo(pub Mutex<HashMap<String, Result<ResolvedIdentity, String>>>);
+
+const MEMO_CAP: usize = 256;
 
 #[tauri::command]
 pub async fn metadata_resolve(
@@ -36,7 +40,11 @@ pub async fn metadata_resolve(
 
     let result = probe(&key).await;
     let out = result.clone();
-    memo.0.lock().expect("memo lock").insert(key, out);
+    let mut memo = memo.0.lock().expect("memo lock");
+    if memo.len() >= MEMO_CAP {
+        memo.clear(); // bounded: the oldest entries are the coldest anyway
+    }
+    memo.insert(key, out);
     result.map_err(crate::error::other)
 }
 

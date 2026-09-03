@@ -24,6 +24,10 @@ pub struct Settings {
     /// downloaded.txt location (defaults to app-data, §5.3).
     #[serde(default)]
     pub archive_path: Option<String>,
+    /// §11 migration is one-shot: once applied, later launches never re-read
+    /// the v1 config (that would clobber post-migration v2 settings changes).
+    #[serde(default)]
+    pub migrated_from_v1: bool,
 }
 
 fn settings_path() -> PathBuf {
