@@ -157,7 +157,17 @@ function Row({ job, index }: { job: Job; index: number }) {
         <td>
           <div className="flex items-center gap-2">
             <div className="progress" style={{ flex: 1 }}>
-              <div style={{ width: `${job.pct ?? 0}%` }} />
+              <div
+                style={{
+                  // playlist jobs: the bar tracks overall items-done, not the
+                  // current item's byte percent (D54)
+                  width: `${
+                    job.itemsTotal != null
+                      ? ((job.itemsDone ?? 0) / job.itemsTotal) * 100
+                      : (job.pct ?? 0)
+                  }%`,
+                }}
+              />
             </div>
             <span className="numm">
               {job.itemsTotal != null

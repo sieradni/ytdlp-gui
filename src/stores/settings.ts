@@ -15,6 +15,7 @@ const DEFAULTS: Settings = {
   destination: null,
   concurrency: null,
   archivePath: null,
+  migratedFromV1: false,
 };
 
 /**

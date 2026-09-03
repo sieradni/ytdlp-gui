@@ -450,32 +450,41 @@ impl JobQueue {
         };
 
         // ---- dedupe (D18/D37) + archive skip (D17/D41) ----
-        let identity_key: Option<String> = match &identity {
-            Some((extractor, vid)) => {
-                let key = format!("{extractor} {vid}");
-                // lock scope is minimal — no awaits while the guard lives
-                let duplicate = {
-                    let mut inner = self.inner.lock().expect("queue lock");
-                    if inner.identities.contains(&key) {
-                        true
-                    } else {
-                        inner.identities.insert(key.clone());
-                        false
-                    }
-                };
-                if duplicate {
-                    self.finalize(
-                        &id,
-                        JobState::Duplicate,
-                        Some("duplicate — already queued/running".into()),
-                    )
-                    .await;
-                    self.cleanup_running(&id, &url, None);
-                    return;
-                }
+        // the key drives dedupe and the archive; the identity itself stays
+        // alive for the history write and the probe title (D54).
+        let identity_key: Option<String> = identity.as_ref().map(|i| i.key());
 
+        if let Some(key) = &identity_key {
+            // lock scope is minimal — no awaits while the guard lives
+            let duplicate = {
+                let mut inner = self.inner.lock().expect("queue lock");
+                if inner.identities.contains(key) {
+                    true
+                } else {
+                    inner.identities.insert(key.clone());
+                    false
+                }
+            };
+            if duplicate {
+                self.finalize(
+                    &id,
+                    JobState::Duplicate,
+                    Some("duplicate — already queued/running".into()),
+                )
+                .await;
+                self.cleanup_running(&id, &url, None);
+                return;
+            }
+
+            // pre-check the archive for single-video jobs only (D53, D54):
+            // playlist ids never appear in the archive, so checking them is
+            // meaningless — within-playlist skipping is yt-dlp's native
+            // --download-archive behavior.
+            let is_playlist = identity.as_ref().is_some_and(|i| i.is_playlist);
+            if !is_playlist && opts.skip_downloaded {
+                let (ex, vid) = key.split_once(' ').expect("identity key shape");
                 let arch = archive_path_from_settings();
-                if opts.skip_downloaded && archive_contains(&arch, extractor, vid) {
+                if archive_contains(&arch, ex, vid) {
                     self.push_log(&id, "already downloaded — skipping (archive)".into());
                     let mut row = self.row(&id);
                     row.state = "done".into();
@@ -484,14 +493,28 @@ impl JobQueue {
                     row.updated_at = crate::store::now_unix();
                     self.save_row(&row);
                     self.emit_update(&row);
-                    self.cleanup_running(&id, &url, Some(&key));
+                    self.cleanup_running(&id, &url, Some(key));
                     self.emit_queue_changed();
                     return;
                 }
-                Some(key)
             }
-            None => None,
-        };
+
+            // D45: the probe title is the earliest reliable display name —
+            // surface it immediately (download output only carries titles in
+            // verbose mode, so until now jobs showed their url).
+            if let Some(t) = identity.as_ref().and_then(|i| i.title.clone()) {
+                let mut row = self.row(&id);
+                if row.title.is_none() {
+                    row.title = Some(t);
+                    row.updated_at = crate::store::now_unix();
+                    self.save_row(&row);
+                    let _ = self.app.emit(
+                        "job:update",
+                        serde_json::json!({ "id": id, "state": "fetching", "title": row.title }),
+                    );
+                }
+            }
+        }
 
         // ---- downloading ----
         // the archive is passed even when the identity is known-new: within
@@ -542,10 +565,18 @@ impl JobQueue {
                 items_done,
                 items_total,
             } => {
+                // playlist display title comes from the resolve probe (the
+                // download output's own title lines don't cover playlists)
+                let title = title.or_else(|| identity.as_ref().and_then(|i| i.title.clone()));
                 // engine archive-write rule (§5.2): the engine appends
                 // `<extractor> <id>` itself after success — idempotent, so
                 // archive/history/file can't drift when yt-dlp errors late.
-                if let Some(key) = &identity_key {
+                // playlist jobs are exempt (D54): the playlist id is not an
+                // archive entry (yt-dlp wrote the per-item ids itself via
+                // --download-archive) and one history row can't represent
+                // every item.
+                let is_playlist = identity.as_ref().is_some_and(|i| i.is_playlist);
+                if let (Some(key), false) = (&identity_key, is_playlist) {
                     if let Some((ex, vid)) = key.split_once(' ') {
                         if let Err(e) = archive_append(&archive_path_from_settings(), ex, vid) {
                             self.push_log(&id, format!("archive write failed: {e}"));
@@ -617,10 +648,14 @@ impl JobQueue {
         let mut title: Option<String> = None;
         let mut last_emit = std::time::Instant::now();
         let mut last_db = std::time::Instant::now();
-        // playlist progress (D33): total from the counter line, done counted
-        // from item starts (monotonic — archive-skipped items count too).
+        // playlist progress (D54): total from the counter line; items done
+        // counted from per-item COMPLETIONS (after_move:filepath prints once
+        // per downloaded item — verified live 2026-09; item-start lines don't
+        // exist for downloads) plus archive-skipped items. count in a local
+        // set of ids so the 200ms emit-throttle can't double-count.
         let mut items_done: u32 = 0;
         let mut items_total: Option<u32> = None;
+        let mut seen_items: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut last_items_db = std::time::Instant::now();
 
         loop {
@@ -699,12 +734,33 @@ impl JobQueue {
                             );
                         }
                         ParsedLine::FinalPath(p) => {
-                            final_path = Some(p);
+                            // one print per downloaded item → playlist item
+                            // completion (D54). single videos overwrite
+                            // harmlessly; playlists accumulate per item.
+                            if seen_items.insert(p.clone()) {
+                                final_path = Some(p);
+                                items_done = items_done.saturating_add(1);
+                                if last_emit.elapsed().as_millis() >= 200 {
+                                    last_emit = std::time::Instant::now();
+                                    let _ = self.app.emit(
+                                        "job:update",
+                                        serde_json::json!({
+                                            "id": id, "state": "downloading",
+                                            "itemsDone": items_done, "itemsTotal": items_total,
+                                        }),
+                                    );
+                                }
+                            }
                         }
                         ParsedLine::PlaylistCounter { done: _, total } => {
                             // counter's N is the item being fetched now; items
                             // done comes from our own count, total from here.
                             items_total = Some(total);
+                            // the counter line announces the total before item
+                            // 1 — reset our count so a resumed playlist's old
+                            // count doesn't leak into this run.
+                            seen_items.clear();
+                            items_done = 0;
                             if last_emit.elapsed().as_millis() >= 200 {
                                 last_emit = std::time::Instant::now();
                                 let _ = self.app.emit(
@@ -716,7 +772,8 @@ impl JobQueue {
                                 );
                             }
                         }
-                        ParsedLine::ItemStart { .. } => {
+                        ParsedLine::PlaylistSkip { .. } => {
+                            // archive-skipped items count as processed (D54)
                             items_done = items_done.saturating_add(1);
                             if last_emit.elapsed().as_millis() >= 200 {
                                 last_emit = std::time::Instant::now();
@@ -737,7 +794,7 @@ impl JobQueue {
                                 self.save_row(&row);
                             }
                         }
-                        ParsedLine::Destination(_) => {}
+                        ParsedLine::Destination(_) | ParsedLine::ItemStart { .. } => {}
                         ParsedLine::Stage("post") => {
                             self.set_state(id, JobState::Post).await;
                         }
@@ -910,27 +967,52 @@ fn normalize_url(raw: &str) -> NormalizeResult {
     NormalizeResult::Ok(format!("https://{t}"))
 }
 
-/// resolve `<extractor> <id>` via `--print` only (D44: never -J at queue
-/// time). simulate-mode probe, no download. playlist urls probe the first
-/// entry so dedupe stays bounded (D33: the playlist itself is one job).
+/// a resolved job identity (D18): `<extractor> <id>` is the key the archive,
+/// history and queue-dedupe all share. playlist urls resolve to the
+/// PLAYLIST's id (playlist_id), not the first item's — verified live
+/// 2026-09: `--print %(id)s` on a playlist emits the first entry's id, which
+/// would poison dedupe/history/archive for multi-item jobs.
+#[derive(Debug, Clone)]
+struct Identity {
+    extractor: String,
+    id: String,
+    /// true when the url resolved as a playlist (playlist_id present).
+    is_playlist: bool,
+    /// display title from the probe (playlist title, or the video's title).
+    title: Option<String>,
+}
+
+impl Identity {
+    fn key(&self) -> String {
+        format!("{} {}", self.extractor, self.id)
+    }
+}
+
+/// resolve the job identity via `--print` only (D44: never -J at queue
+/// time), no download. playlist urls probe with --flat-playlist (one entry
+/// is enough — we only need the playlist id, not the entries).
 async fn resolve_identity(
     yt_dlp: Option<&std::path::Path>,
     url: &str,
     opts: &JobOptions,
-) -> AppResult<Option<(String, String)>> {
+) -> AppResult<Option<Identity>> {
     let mut argv: Vec<String> = vec![
         yt_dlp
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_else(|| "yt-dlp".to_owned()),
         "--no-warnings".into(),
-        "--print".into(),
-        "%(extractor)s %(id)s".into(),
         "--skip-download".into(),
+        "--flat-playlist".into(),
+        "--print".into(),
+        "%(extractor)s|%(playlist_id)s|%(id)s|%(playlist_title)s".into(),
+        "--print".into(),
+        "TITLE:%(title)s".into(),
     ];
     if opts.playlist_mode == PlaylistMode::Single {
         argv.push("--no-playlist".into());
     } else {
-        argv.push("--flat-playlist".into());
+        // one entry is enough — playlist_id/playlist_title come on the first
+        // line regardless; keeps the probe O(1) on huge playlists.
         argv.push("--playlist-items".into());
         argv.push("1".into());
     }
@@ -938,22 +1020,50 @@ async fn resolve_identity(
 
     let mut child = process::spawn(&argv)?;
     let mut rx = process::stream_lines(&mut child)?;
-    let mut extractor_id: Option<(String, String)> = None;
+    let mut resolved: Option<Identity> = None;
     let mut errored: Option<String> = None;
 
-    // the identity pair is the first non-empty stdout line
-    while extractor_id.is_none() {
+    // first non-empty stdout line: `extractor|playlist_id|id|playlist_title`;
+    // single videos add a second line `TITLE:<title>`.
+    while resolved.is_none() {
         match rx.recv().await {
             Some((true, line)) => {
                 let t = line.trim();
-                if !t.is_empty() {
-                    if let Some((ex, vid)) = t.split_once(' ') {
-                        if !ex.is_empty() && !vid.is_empty() {
-                            extractor_id = Some((ex.to_owned(), vid.to_owned()));
-                            break;
+                if t.is_empty() {
+                    continue;
+                }
+                let mut it = t.split('|');
+                let ex = it.next().unwrap_or("").trim();
+                let pl_id = it.next().unwrap_or("").trim();
+                let vid = it.next().unwrap_or("").trim();
+                let pl_title = it
+                    .next()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty() && *s != "NA");
+                if ex.is_empty() || vid.is_empty() {
+                    continue;
+                }
+                let is_playlist = !pl_id.is_empty() && pl_id != "NA";
+                let id = if is_playlist { pl_id } else { vid };
+                let mut identity = Identity {
+                    extractor: ex.to_owned(),
+                    id: id.to_owned(),
+                    is_playlist,
+                    title: pl_title.map(str::to_owned),
+                };
+                // single videos carry their title on a second print line
+                if !is_playlist {
+                    if let Some((true, l2)) = rx.recv().await {
+                        if let Some(t2) = l2.trim().strip_prefix("TITLE:") {
+                            let t2 = t2.trim();
+                            if !t2.is_empty() && t2 != "NA" {
+                                identity.title = Some(t2.to_owned());
+                            }
                         }
                     }
                 }
+                resolved = Some(identity);
+                break;
             }
             Some((false, line)) => {
                 let t = line.trim();
@@ -968,8 +1078,8 @@ async fn resolve_identity(
     let _ = child.kill().await;
     let _ = child.inner.wait().await;
 
-    match (extractor_id, errored) {
-        (Some(pair), _) => Ok(Some(pair)),
+    match (resolved, errored) {
+        (Some(i), _) => Ok(Some(i)),
         (None, Some(e)) => Err(other(e)),
         (None, None) => Err(other("could not resolve identity (no output from yt-dlp)")),
     }

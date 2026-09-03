@@ -64,7 +64,19 @@ fn discover() -> Option<(serde_json::Value, PathBuf)> {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
             continue;
         };
-        return Some((value, dir.join("downloaded.txt")));
+        // v1 keeps downloaded.txt beside its yt-dlp.exe, NOT beside the
+        // config (gui.py: `dirname(ytdlp_path)/downloaded.txt`). try that
+        // first; fall back to the config dir (the v1 layout when yt-dlp
+        // lived with the app). both must exist as files to be believed.
+        let archive = value
+            .get("ytdlp_path")
+            .and_then(|v| v.as_str())
+            .map(std::path::PathBuf::from)
+            .filter(|p| p.is_file())
+            .and_then(|p| p.parent().map(|d| d.join("downloaded.txt")))
+            .filter(|p| p.is_file())
+            .unwrap_or_else(|| dir.join("downloaded.txt"));
+        return Some((value, archive));
     }
     None
 }
@@ -121,13 +133,32 @@ pub fn map_config(cfg: &serde_json::Value) -> (JobOptions, Vec<String>) {
     // playlists: v2 composer default is "single video only". v1's
     // download_playlists + playlist_limit (0 = all) map onto all / first-n.
     if b("download_playlists") == Some(true) {
-        match cfg.get("playlist_limit").and_then(|v| v.as_i64()) {
-            Some(0) | None => opts.playlist_mode = PlaylistMode::All,
-            Some(n) if n > 0 => {
-                opts.playlist_mode = PlaylistMode::FirstN;
-                opts.playlist_n = u32::try_from(n).unwrap_or(u32::MAX);
+        // v1 saves an int (gui.py: `int(var.get())`), but the config is a
+        // hand-editable json file — tolerate a numeric string too. silently
+        // mapping "first 25" to "all" would be the worst kind of wrong.
+        match cfg.get("playlist_limit") {
+            // absent = v1's own default (0 = all)
+            None => opts.playlist_mode = PlaylistMode::All,
+            Some(v) => {
+                let n = v
+                    .as_i64()
+                    .or_else(|| v.as_str().and_then(|s| s.trim().parse::<i64>().ok()));
+                match n {
+                    Some(0) => opts.playlist_mode = PlaylistMode::All,
+                    Some(n) if n > 0 => {
+                        opts.playlist_mode = PlaylistMode::FirstN;
+                        opts.playlist_n = u32::try_from(n).unwrap_or(u32::MAX);
+                    }
+                    // negative or unparseable: dropped (report the raw value,
+                    // not the failed parse); fallback = all —
+                    // download_playlists was true, so "single video" would
+                    // contradict the user's recorded intent
+                    _ => {
+                        dropped.push(format!("playlist_limit={v}"));
+                        opts.playlist_mode = PlaylistMode::All;
+                    }
+                }
             }
-            Some(n) => dropped.push(format!("playlist_limit={n}")),
         }
     }
 
@@ -153,6 +184,15 @@ pub fn apply(
         settings.destination = Some(dir);
     }
 
+    // unmapped v1 keys are reported in dropped_keys, never silently ignored
+    // (honest ui). 'template' is superseded by v2's own output-template
+    // field; 'format'/'playlist_range' are v1 ui state, not v2 options.
+    for key in ["format", "playlist_range", "template"] {
+        if cfg.get(key).is_some() {
+            report.dropped_keys.push(format!("{key}=unmapped"));
+        }
+    }
+
     // composer initial values ("migrated v1")
     let (opts, dropped) = map_config(&cfg);
     report.dropped_keys = dropped;
@@ -167,11 +207,14 @@ pub fn apply(
         report.history_seeded = db.seed_history_from_archive(&text)? as u64;
     }
 
-    // v1 binaries → custom-binary offer in the wizard (§11 table row 4)
+    // v1 binaries → custom-binary offer in the wizard (§11 table row 4).
+    // v1 stores yt-dlp as a FILE and ffmpeg as a DIRECTORY (the value is
+    // passed straight to --ffmpeg-location, which accepts a dir) — verified
+    // against the real config on this machine. both offer paths must exist.
     if let Some(p) = s("ytdlp_path").filter(|p| std::path::Path::new(p).is_file()) {
         report.v1_ytdlp_path = Some(p);
     }
-    if let Some(p) = s("ffmpeg_path").filter(|p| std::path::Path::new(p).is_file()) {
+    if let Some(p) = s("ffmpeg_path").filter(|p| std::path::Path::new(p).exists()) {
         report.v1_ffmpeg_path = Some(p);
     }
 
@@ -240,6 +283,24 @@ mod tests {
             r#"{ "download_playlists": false, "playlist_limit": 25 }"#,
         ));
         assert_eq!(opts2.playlist_mode, PlaylistMode::Single);
+    }
+
+    #[test]
+    fn playlist_limit_as_hand_edited_string_maps() {
+        let (opts, dropped) = map_config(&cfg(
+            r#"{ "download_playlists": true, "playlist_limit": "25" }"#,
+        ));
+        assert!(dropped.is_empty());
+        assert_eq!(opts.playlist_mode, PlaylistMode::FirstN);
+        assert_eq!(opts.playlist_n, 25);
+        // non-numeric garbage is dropped, mapping to "all" (honest default)
+        let (opts2, dropped2) = map_config(&cfg(
+            r#"{ "download_playlists": true, "playlist_limit": "lots" }"#,
+        ));
+        assert_eq!(opts2.playlist_mode, PlaylistMode::All);
+        // the raw value is reported, not the failed parse
+        assert!(dropped2.iter().any(|d| d.contains("playlist_limit=")));
+        assert!(dropped2.iter().any(|d| d.contains("lots")));
     }
 
     #[test]

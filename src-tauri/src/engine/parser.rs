@@ -23,8 +23,12 @@ pub enum ParsedLine {
     /// a playlist item started: `[download] <id>: ...` destination lines.
     ItemStart { id: String },
     /// yt-dlp's playlist counter: `[download] Downloading item 3 of 12`.
-    /// authoritative for the total; items done are counted from ItemStart.
+    /// authoritative for the total; items done are counted from completions
+    /// (FinalPath) + archive skips (PlaylistSkip) — see D54.
     PlaylistCounter { done: u32, total: u32 },
+    /// `[download] <id>: <title> has already been recorded in the archive`.
+    /// a skipped playlist item — counts as processed (D54).
+    PlaylistSkip { id: String },
     /// destination line: `Destination: …` / `[Merger] …` (post-processing).
     Destination(String),
     /// fragment/stream stage line that still counts as downloading.
@@ -104,10 +108,24 @@ pub fn parse_line(raw: &str) -> ParsedLine {
             if rest.contains('%') {
                 return ParsedLine::Line(line.to_owned());
             }
-            // `[download] abc123: Some Title`
-            if let Some((id, _title)) = rest.split_once(": ") {
+            // `[download] <id>: <title> has already been recorded in the
+            // archive` — a skipped playlist item (verified live 2026-09:
+            // this id:-style line is only ever emitted for archive skips;
+            // downloaded items print Destination/progress lines instead).
+            if let Some((id, rest)) = rest.split_once(": ") {
                 let id = id.trim();
-                if !id.is_empty() && id.len() <= 64 {
+                let id_like = !id.is_empty()
+                    && id.len() <= 64
+                    && id
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+                if id_like && rest.contains("already been recorded in the archive") {
+                    return ParsedLine::PlaylistSkip { id: id.to_owned() };
+                }
+                // `[download] abc123: Some Title` — runtime title (D45).
+                // the charset guard keeps container lines like "Finished
+                // downloading playlist" from posing as item starts.
+                if id_like {
                     return ParsedLine::ItemStart { id: id.to_owned() };
                 }
             }
@@ -288,9 +306,22 @@ mod tests {
     }
 
     #[test]
-    fn archive_skip_line_reads_as_item_start() {
-        // skipped items are "processed" for items-done counting (D33)
-        match parse_line("[download] abc123: Has already been recorded in the archive") {
+    fn archive_skip_line_reads_as_playlist_skip() {
+        // skipped items are "processed" for items-done counting (D54);
+        // verbatim shape from a live run (2026-09)
+        match parse_line(
+            "[download] 0Rp9KJCEIvg: The most interesting hack in history just got weirder... has already been recorded in the archive",
+        ) {
+            ParsedLine::PlaylistSkip { id } => assert_eq!(id, "0Rp9KJCEIvg"),
+            other => panic!("wrong parse: {other:?}"),
+        }
+        // ids with hyphen/underscore still recognized
+        match parse_line("[download] abc-_123: X has already been recorded in the archive") {
+            ParsedLine::PlaylistSkip { id } => assert_eq!(id, "abc-_123"),
+            other => panic!("wrong parse: {other:?}"),
+        }
+        // a genuine item-start title line is NOT a skip
+        match parse_line("[download] abc123: Sunset Timelapse 4K") {
             ParsedLine::ItemStart { id } => assert_eq!(id, "abc123"),
             other => panic!("wrong parse: {other:?}"),
         }
@@ -310,6 +341,23 @@ mod tests {
             ParsedLine::Destination(d) => assert!(d.ends_with(".mp4")),
             other => panic!("wrong parse: {other:?}"),
         }
+    }
+
+    #[test]
+    fn captured_skip_sequence_counts_two_items() {
+        // verbatim lines from a live re-run over an already-archived playlist
+        // (2026-09): both items skipped → each is one processed item (D54)
+        let lines = [
+            "[download] Downloading playlist: Fireship - Videos",
+            "[download] 0Rp9KJCEIvg: The most interesting hack in history just got weirder... has already been recorded in the archive",
+            "[download] r-tzcMlQISk: The mystery is solved... and the answer is 40x cheaper than Claude has already been recorded in the archive",
+            "[download] Finished downloading playlist: Fireship - Videos",
+        ];
+        let kinds: Vec<ParsedLine> = lines.iter().map(|l| parse_line(l)).collect();
+        assert!(matches!(kinds[0], ParsedLine::Line(_)));
+        assert!(matches!(kinds[1], ParsedLine::PlaylistSkip { .. }));
+        assert!(matches!(kinds[2], ParsedLine::PlaylistSkip { .. }));
+        assert!(matches!(kinds[3], ParsedLine::Line(_)));
     }
 
     #[test]

@@ -73,6 +73,8 @@ export interface Settings {
   destination: string | null;
   concurrency: number | null;
   archivePath: string | null;
+  /** one-shot v1 migration marker (D55) — must round-trip through saves */
+  migratedFromV1: boolean;
 }
 
 export const settingsGet = () => invoke<Settings>("settings_get");
