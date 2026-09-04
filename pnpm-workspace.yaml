@@ -1,8 +1,11 @@
 packages:
   - "."
 
-onlyBuiltDependencies:
-  - esbuild
+# pnpm 11 (default-on strictDepBuilds) hard-errors installs when a dep has
+# build scripts and no approval exists; onlyBuiltDependencies is no longer
+# read — allowBuilds is the v11 map form.
+allowBuilds:
+  esbuild: true
 
 # pnpm 11 runs a deps status check before `pnpm run`, spawning a nested
 # `pnpm` that corepack's cmd shim can't serve on windows. we keep deps
