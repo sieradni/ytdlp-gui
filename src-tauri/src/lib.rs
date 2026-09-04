@@ -88,6 +88,7 @@ pub fn run() {
             commands::jobs::queue_list,
             commands::jobs::queue_pause,
             commands::jobs::queue_resume,
+            commands::jobs::overwrite_targets,
             commands::migration_status,
             commands::metadata::metadata_resolve,
             commands::history::history_list,

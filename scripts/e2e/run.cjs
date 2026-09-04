@@ -40,11 +40,22 @@ const TYCHO = "https://tycho.bandcamp.com/album/dive"; // 10-track album
 const SC_FLICKER = "https://soundcloud.com/forss/flickermood"; // single-format audio
 const GARBAGE = "not a url";
 const INTRANET = "http://192.168.1.1/x";
-const DEAD = "https://www.youtube.com/watch?v=xxxxxxxxxxx"; // unavailable
+const DEAD = "https://soundcloud.com/forss/this-track-does-not-exist-xyz"; // 404 (de-youtube: platform-independent)
 const DESPACITO_W = "https://www.youtube.com/watch?v=kJQP7kiw5Fk";
 const DESPACITO_S = "https://youtu.be/kJQP7kiw5Fk"; // same video, different url (S5)
 const GANGNAM = "https://www.youtube.com/watch?v=9bZkp7q19f0";
 const BBB = "https://www.youtube.com/watch?v=aqz-KE-bpKQ"; // 4k, big/slow (S15/16)
+
+// source manifest (d60 close-out): platform dependency per scenario.
+// youtube bot-gates under load (platform-side, reproduced with the raw
+// binary), so --smoke runs every scenario NOT tagged youtube — the
+// CI-runnable core that needs no youtube at all.
+const SOURCE = {
+  1: "youtube", 4: "youtube", 3: "youtube", 2: "youtube", 9: "other",
+  10: "other", 12: "other", 11: "youtube", 13: "youtube", 14: "other",
+  8: "youtube", 7: "youtube", 5: "youtube", 6: "youtube", 15: "youtube",
+  16: "youtube", 18: "other", 19: "other",
+};
 
 // ---------------------------------------------------------------------------
 // page-side helper bundle (injected once per page load)
@@ -220,6 +231,16 @@ async function scenario(n, name, fn) {
     await fn();
   } catch (e) {
     record(n, name, false, [`threw: ${e.message}`]);
+    // failure dump: page + recent job states at throw time — the single
+    // most useful artifact for diagnosing a red run after the fact
+    try {
+      const page = await evalAsync(ws, `document.querySelector('.tab-btn.active')?.textContent.trim()`);
+      const js = await jobs();
+      const recent = js.slice(-6).map((j) => `${j.id.slice(-6)}=${j.state}${j.error ? ":" + j.error.slice(0, 50) : ""}`).join(" | ");
+      console.log(`        dump: page=${page} recent=[${recent}]`);
+    } catch {
+      console.log("        dump: unavailable (app likely gone)");
+    }
   }
 }
 
@@ -402,8 +423,10 @@ S[9] = async () => {
   await ws.call("Input.insertText", { text: `${GARBAGE}\n${INTRANET}` });
   await sleep(150);
   await evalAsync(ws, `window.__e2e.clickText('.card button.primary', 'queue downloads', true)`);
-  await sleep(400);
-  const fb = await evalAsync(ws, `window.__e2e.feedbackText()`);
+  // the queue-time gate (D59) probes identity with a 2.5s cap before queueing
+  // — poll for the feedback instead of a single-shot read (which predates the
+  // gate and read too early)
+  const fb = await evalUntil(`(() => { const t = window.__e2e.feedbackText(); return t && t.includes("invalid") ? t : "pending"; })()`, { timeoutMs: 10000, everyMs: 300, label: "intake feedback (s9)" }).catch(() => null);
   details.push(`intake feedback: ${JSON.stringify(fb)}`);
   const textareaVal = await evalAsync(ws, `window.__e2e.composer()?.value ?? ''`);
   details.push(`textarea kept the accepted intranet url, dropped garbage: ${JSON.stringify(textareaVal)}`);
@@ -434,18 +457,18 @@ S[10] = async () => {
 S[12] = async () => {
   const details = [];
   await queueViaComposer(DEAD);
-  const err = await waitJob("xxxxxxxxxxx", "error", 60000, 400);
+  const err = await waitJob("this-track-does-not-exist-xyz", "error", 60000, 400);
   details.push(`error text: ${JSON.stringify(err.error)}`);
-  const row = await evalAsync(ws, `window.__e2e.rowByMeta('xxxxxxxxxxx') ? 'found' : null`);
+  const row = await evalAsync(ws, `window.__e2e.rowByMeta('this-track-does-not-exist-xyz') ? 'found' : null`);
   // expand output
   // expand via the row's dedicated "output" chevron (title="output"),
   // not a synthetic .t-title click (react didn't register those reliably)
-  await evalAsync(ws, `(() => { const r = [...document.querySelectorAll('tr.qrow')].find(x => x.querySelector('.t-meta')?.textContent.includes('xxxxxxxxxxx')); if (!r) return false; const b = [...r.querySelectorAll('button')].find(b => b.title === 'output'); if (!b) return false; b.click(); return true; })()`);
+  await evalAsync(ws, `(() => { const r = [...document.querySelectorAll('tr.qrow')].find(x => x.querySelector('.t-meta')?.textContent.includes('this-track-does-not-exist-xyz')); if (!r) return false; const b = [...r.querySelectorAll('button')].find(b => b.title === 'output'); if (!b) return false; b.click(); return true; })()`);
   await sleep(300);
-  const logLines = await evalAsync(ws, `(() => { const r = [...document.querySelectorAll('tr.qrow')].find(x => x.querySelector('.t-meta')?.textContent.includes('xxxxxxxxxxx')); return r && r.nextElementSibling?.classList.contains('log-row') ? r.nextElementSibling.querySelectorAll('.logwrap > div').length : 0; })()`);
+  const logLines = await evalAsync(ws, `(() => { const r = [...document.querySelectorAll('tr.qrow')].find(x => x.querySelector('.t-meta')?.textContent.includes('this-track-does-not-exist-xyz')); return r && r.nextElementSibling?.classList.contains('log-row') ? r.nextElementSibling.querySelectorAll('.logwrap > div').length : 0; })()`);
   details.push(`expanded log lines: ${logLines}`);
   // hover card
-  await evalAsync(ws, `(() => { const r = [...document.querySelectorAll('tr.qrow')].find(x => x.querySelector('.t-meta')?.textContent.includes('xxxxxxxxxxx')); if (r) r.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })); return true; })()`);
+  await evalAsync(ws, `(() => { const r = [...document.querySelectorAll('tr.qrow')].find(x => x.querySelector('.t-meta')?.textContent.includes('this-track-does-not-exist-xyz')); if (r) r.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })); return true; })()`);
   await sleep(900);
   const card = await evalAsync(ws, `window.__e2e.hoverCard()`);
   details.push(`hover card shows error: ${card ? JSON.stringify(card.slice(0, 160)) : "MISSING"}`);
@@ -935,21 +958,6 @@ S[18] = async () => {
   // mnemonics, so keyboard automation is unreliable — UI Automation invokes
   // each button BY NAME instead (position-independent, no interception of
   // the webview needed).
-  // UIA driver lives in answer-dialog.ps1 (see its header for why the real
-  // dialog is driven by name instead of intercepted); outcome words:
-  // clicked:invoke | clicked:click | btn-no-rect | dialog-not-found | exec-fail:*
-  const answerDialog = (name, timeoutMs = 15000) => {
-    try {
-      return require("child_process").execFileSync(
-        "powershell",
-        ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(__dirname, "answer-dialog.ps1"), "-Title", "file already exists", "-Name", name, "-TimeoutMs", String(timeoutMs)],
-        { encoding: "utf8", timeout: timeoutMs + 10000 },
-      ).trim();
-    } catch (e) {
-      const out = String((e.stdout ?? "") + (e.stderr ? " ERR:" + String(e.stderr).split(/\r?\n/)[0] : "")).trim();
-      return out || `exec-fail:${e.status}`;
-    }
-  };
   // composer: audio/mp3, skip OFF (a-walk is archived by earlier scenarios)
   await setOpts({ dlType: "audio", audioFormat: "mp3", skipDownloaded: false });
   details.push("mirror: audio/mp3, skip off");
@@ -1033,6 +1041,107 @@ S[18] = async () => {
 // main
 // ---------------------------------------------------------------------------
 
+/** drive the real native rfd task dialog (title "file already exists", custom
+ * buttons "overwrite"/"cancel") by NAME over UI Automation — task dialogs
+ * have no default button (Enter is inert) and rfd adds no mnemonics, so
+ * keyboard automation is unreliable and the webview cannot be intercepted
+ * (frozen __TAURI_INTERNALS__, ESM plugin module). outcome words:
+ * clicked:invoke | clicked:click | btn-no-rect | dialog-not-found | exec-fail:*
+ * the dialog is owned by the main window — the driver searches its subtree. */
+const answerDialog = (name, timeoutMs = 15000) => {
+  try {
+    return require("child_process").execFileSync(
+      "powershell",
+      ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(__dirname, "answer-dialog.ps1"), "-Title", "file already exists", "-Name", name, "-TimeoutMs", String(timeoutMs)],
+      { encoding: "utf8", timeout: timeoutMs + 10000 },
+    ).trim();
+  } catch (e) {
+    const out = String((e.stdout ?? "") + (e.stderr ? " ERR:" + String(e.stderr).split(/\r?\n/)[0] : "")).trim();
+    return out || `exec-fail:${e.status}`;
+  }
+};
+
+S[19] = async () => {
+  const details = [];
+  const URL_ = "https://tycho.bandcamp.com/track/a-walk";
+  // queue-TIME gate (upgrade 1): the composer resolves identity at queue time
+  // (memoized D37 probe), finds an existing [id] file in the destination, and
+  // presents the same dialog as history's gate — uniform D59 coverage.
+  // playlists are excluded by design (the archive already dedupes them).
+  await setOpts({ dlType: "audio", audioFormat: "mp3", skipDownloaded: false });
+  details.push("mirror: audio/mp3, skip off");
+  // ensure a clean initial download exists (same pattern as s18)
+  let prior = new Set((await jobs()).map((j) => j.id));
+  let base = (await jobs()).find((j) => j.url.includes("tycho.bandcamp.com/track/a-walk") && j.state === "done" && !(j.error ?? ""));
+  if (!base) {
+    await evalUntil(`(() => { window.__e2e.goto('home'); return document.querySelector('.tab-btn.active')?.textContent.trim() === 'home' ? 'ok' : 'pending'; })()`, { timeoutMs: 8000, label: "home active (s19)" });
+    await queueViaComposer(URL_);
+    for (let i = 0; i < 90; i++) {
+      const js = await jobs();
+      const nz = js.filter((j) => !prior.has(j.id));
+      if (nz.length && ["done", "error"].includes(nz[0].state)) { base = nz[0]; break; }
+      await sleep(1000);
+    }
+    if (!base) throw new Error("initial download never finished");
+    prior = new Set((await jobs()).map((j) => j.id));
+  }
+  if (base.state !== "done" || (base.error ?? "")) throw new Error(`initial download not clean: ${base.state} ${base.error ?? ""}`);
+  const target = base.finalPath;
+  if (!fs.existsSync(target)) throw new Error(`initial file missing: ${target}`);
+  const mtime0 = fs.statSync(target).mtimeMs;
+  details.push(`initial download: ${path.basename(target)}`);
+  const queueAgain = async () => {
+    await evalUntil(`(() => { window.__e2e.goto('home'); return document.querySelector('.tab-btn.active')?.textContent.trim() === 'home' ? 'ok' : 'pending'; })()`, { timeoutMs: 8000, label: "home active (s19)" });
+    await queueViaComposer(URL_);
+  };
+  // step 1: cancel — dialog fires on QUEUE click, cancel queues nothing and
+  // renders the composer's overwrite-cancelled feedback (the positive signal
+  // that the queue-time gate executed)
+  await queueAgain();
+  const ansA = answerDialog("cancel");
+  const hint = await evalUntil(`(() => [...document.querySelectorAll('.card div')].some(h => h.textContent.includes('queueing cancelled')) ? 'ok' : 'pending')()`, { timeoutMs: 8000, everyMs: 300, label: "cancel feedback (s19)" }).catch(() => "timeout");
+  await sleep(800);
+  let after = await jobs();
+  const newAfterCancel = after.filter((j) => !prior.has(j.id));
+  details.push(`cancel: dialog=${ansA}, feedback=${hint === "ok"}, jobs queued=${newAfterCancel.length}`);
+  const cancelOk = ansA.startsWith("clicked") && hint === "ok" && newAfterCancel.length === 0;
+  prior = new Set(after.map((j) => j.id));
+  // step 2: grant — job queued with overwrite=true, finishes clean
+  await queueAgain();
+  const ansB = answerDialog("overwrite");
+  details.push(`grant: dialog=${ansB}`);
+  let j2 = null;
+  for (let i = 0; i < 90; i++) {
+    const js = await jobs();
+    const nz = js.filter((j) => !prior.has(j.id));
+    if (nz.length && ["done", "error", "duplicate"].includes(nz[0].state)) { j2 = nz[0]; break; }
+    await sleep(1000);
+  }
+  if (!j2) {
+    const stuck = await jobs();
+    const stuckState = stuck.filter((j) => !prior.has(j.id)).map((j) => `${j.id.slice(-6)}:${j.state}:${(j.error ?? "").slice(0, 40)}`).join(", ") || "no new jobs";
+    let probe = "probe-fail";
+    try {
+      probe = require("child_process").execFileSync("powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(__dirname, "answer-dialog.ps1"), "-Title", "file already exists", "-Name", "overwrite", "-TimeoutMs", "3000", "-Probe"], { encoding: "utf8", timeout: 15000 }).trim();
+    } catch { }
+    details.push(`TIMEOUT: new jobs=[${stuckState}], dialog ${probe}`);
+    record(19, "queue-time overwrite gate (D59)", false, details);
+    return;
+  }
+  details.push(`granted job: ${j2.state}${j2.error ? " — " + j2.error.slice(0, 60) : ""}`);
+  // the real assertion: the job's PERSISTED options carry overwrite=true
+  let ow = "?";
+  try {
+    ow = require("child_process").execSync(
+      `python -c "import sqlite3,json;con=sqlite3.connect(r'${(process.env.APPDATA + "\\\\ytdlp-gui\\\\history.db").replace(/\\/g, "/")}');r=con.execute('select options from jobs where id=?',('${j2.id}',)).fetchone();print(str(json.loads(r[0]).get('overwrite')).lower())"`,
+      { encoding: "utf8" },
+    ).trim();
+  } catch { ow = "db-err"; }
+  const mtime1 = fs.existsSync(target) ? fs.statSync(target).mtimeMs : 0;
+  details.push(`options.overwrite=${ow}; file re-downloaded (mtime advanced): ${mtime1 > mtime0}`);
+  record(19, "queue-time overwrite gate (D59)", !!(cancelOk && ansB.startsWith("clicked") && j2.state === "done" && !(j2.error ?? "") && ow === "true" && mtime1 > mtime0), details);
+};
+
 /** wipe all persisted state except the staged managed binaries — every
  * runner invocation must start deterministic: a leftover zoo job makes d33
  * reject s1's queue as a duplicate, and a leftover second history row for
@@ -1075,12 +1184,43 @@ async function main() {
     });
     probe.on("error", () => resolve());
   });
+  if (process.argv.includes("--list")) {
+    for (const n of [1, 4, 3, 2, 9, 10, 12, 11, 13, 14, 8, 7, 5, 6, 15, 16, 18, 19])
+      console.log(`S${n}	${SOURCE[n]}	${SCEN_NAMES[n]}`);
+    return;
+  }
   const only = process.argv.includes("--only")
     ? process.argv[process.argv.indexOf("--only") + 1].split(",").map(Number)
     : null;
   if (process.argv.includes("--fresh") || !only) wipeState();
-  const order = [1, 4, 3, 2, 9, 10, 12, 11, 13, 14, 8, 7, 5, 6, 15, 16, 18];
+  let order = [1, 4, 3, 2, 9, 10, 12, 11, 13, 14, 8, 7, 5, 6, 15, 16, 18, 19];
+  if (process.argv.includes("--smoke")) order = order.filter((n) => SOURCE[n] !== "youtube");
   const toRun = only ? order.filter((n) => only.includes(n)) : order;
+  if (toRun.length === 0) {
+    console.log("no scenarios selected" + (process.argv.includes("--smoke") ? " (smoke excludes youtube-tagged scenarios; youtube is bot-gating this machine?)" : ""));
+    return;
+  }
+
+  // the runner drives the app over cdp — a stale exe silently tests
+  // yesterday's build (found live after a clippy-only compile). abort when
+  // any tracked source file is newer than the debug binary.
+  const { execSync } = require("child_process");
+  try {
+    const exeM = fs.statSync(EXE).mtimeMs;
+    const repoRoot = path.join(__dirname, "../..");
+    const stale = execSync("git ls-files", { encoding: "utf8", cwd: repoRoot })
+      .split("\n")
+      .filter((f) => /\.rs$/.test(f) || f.includes("capabilities") || f.includes("tauri.conf"))
+      .filter((f) => {
+        const p = path.join(repoRoot, f);
+        return fs.existsSync(p) && fs.statSync(p).mtimeMs > exeM;
+      });
+    if (stale.length) {
+      console.error(`ABORT: ${stale.length} rust/capability file(s) newer than the debug exe — run: cargo build --manifest-path src-tauri/Cargo.toml`);
+      console.error("  e.g. " + stale.slice(0, 4).join(", "));
+      process.exit(3);
+    }
+  } catch { /* outside a git checkout or exe missing — launch will report */ }
 
   console.log(`launching real app: ${EXE} (cdp :${PORT})`);
   seedSettings();
@@ -1130,6 +1270,7 @@ const SCEN_NAMES = {
   15: "pause never kills (D34)",
   16: "restart normalization (D35)",
   18: "re-download overwrite gate (D59)",
+  19: "queue-time overwrite gate (D59)",
 };
 
 function writeResultsDoc() {

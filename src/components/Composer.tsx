@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { open } from "@tauri-apps/plugin-dialog";
+import { ask, open } from "@tauri-apps/plugin-dialog";
 import { useQueue } from "../stores/queue";
 import { useSettings } from "../stores/settings";
-import { migrationStatus, type AudioFormat, type JobOptions, type PlaylistMode } from "../lib/ipc";
+import { migrationStatus, overwriteTargets, type AudioFormat, type JobOptions, type PlaylistMode } from "../lib/ipc";
 import { buildPreviewArgs, displayArgv } from "../lib/cmdPreview";
 import { defaultOptions } from "../lib/defaults";
 
@@ -50,6 +50,7 @@ export default function Composer() {
     queued: number;
     dupes: number;
     invalid: [string, string][];
+    overwriteCancelled?: boolean;
   } | null>(null);
   const [copied, setCopied] = useState(false);
 
@@ -96,7 +97,43 @@ export default function Composer() {
 
   const queue = async () => {
     const lines = urls.split(/[\n,;]+/);
-    const fb = await add(lines, opts, dest || undefined);
+    // d60 — same gate as history's ↻, at queue time: single-video jobs that
+    // would land on an existing destination file confirm first. over-asks
+    // are impossible (exact id match), under-asks only when the probe
+    // errors (the engine surfaces that anyway). playlists are excluded —
+    // yt-dlp's --download-archive already covers their re-runs.
+    let queueOpts = opts;
+    if (opts.playlistMode === "single" && !opts.overwrite) {
+      const singles = lines.map((l) => l.trim()).filter(Boolean);
+      let targets: Awaited<ReturnType<typeof overwriteTargets>> = [];
+      try {
+        // the gate must never stall the queue click on a slow/unreachable
+        // url (yt-dlp's generic extractor waits ~20s on a connect timeout):
+        // race the probe with a short cap — unresolvable-in-time = queue
+        // unguarded, the engine reports the real error per D28
+        targets = await Promise.race([
+          overwriteTargets(singles, true, opts.skipDownloaded).catch(() => []),
+          new Promise<Awaited<ReturnType<typeof overwriteTargets>>>((r) => setTimeout(() => r([]), 2500)),
+        ]);
+      } catch {
+        targets = []; // probe unavailable → queue unguarded (engine reports)
+      }
+      if (targets.length > 0) {
+        const list = targets.map((t) => `“${t.name}”`).join("\n");
+        const ok = await ask(
+          `${list} already exists in the destination.\n\nQueuing replaces it with a fresh download (metadata re-embedded) using the current composer settings.`,
+          { title: "file already exists", kind: "warning", okLabel: "overwrite", cancelLabel: "cancel" },
+        );
+        if (!ok) {
+          setFeedback({ queued: 0, dupes: 0, invalid: [], overwriteCancelled: true });
+          return;
+        }
+        // per-call only: the composer's visible state (and the D19 mirror,
+        // which must keep reflecting it) stay untouched
+        queueOpts = { ...opts, overwrite: true };
+      }
+    }
+    const fb = await add(lines, queueOpts, dest || undefined);
     setFeedback({
       queued: fb.jobs.length,
       dupes: fb.duplicatesSkipped,
@@ -373,8 +410,9 @@ export default function Composer() {
             }}
           >
             <span style={{ fontSize: 12 }}>
-              {feedback.queued} queued · {feedback.dupes} duplicates skipped ·{" "}
-              {feedback.invalid.length} invalid
+              {feedback.overwriteCancelled
+                ? "queueing cancelled — file already exists (nothing queued)"
+                : `${feedback.queued} queued · ${feedback.dupes} duplicates skipped · ${feedback.invalid.length} invalid`}
             </span>
             {feedback.invalid.map(([line, reason]) => (
               <div key={line} className="warn" style={{ overflowWrap: "anywhere" }}>

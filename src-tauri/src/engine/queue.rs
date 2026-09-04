@@ -567,7 +567,7 @@ impl JobQueue {
                 .await;
             }
             RunOutcome::Error(msg) => {
-                let msg = rewrite_skip_existing_error(&msg);
+                let msg = rewrite_botgate_error(&rewrite_skip_existing_error(&msg));
                 self.finalize(&id, JobState::Error, Some(msg)).await;
             }
             RunOutcome::Done {
@@ -1169,6 +1169,21 @@ fn rewrite_skip_existing_error(msg: &str) -> String {
     }
 }
 
+/// d60: youtube's bot-gate reads like an app failure ("ERROR: [youtube] …:
+/// Sign in to confirm you're not a bot") — it is an auth wall, and the fix
+/// already exists in the ui (composer → advanced → cookies). append that
+/// pointer instead of leaving the user with an undiagnosable dead end.
+fn rewrite_botgate_error(msg: &str) -> String {
+    let lower = msg.to_lowercase();
+    if lower.contains("sign in to confirm") || lower.contains("confirm you're not a bot") {
+        format!(
+            "{msg} — youtube is asking this machine to sign in: set cookies (composer → advanced → cookies → from browser) and re-queue"
+        )
+    } else {
+        msg.to_owned()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1183,6 +1198,17 @@ mod tests {
         // a bare skip (archive hit) stays untouched
         let bare = "[download] x.opus has already been downloaded";
         assert_eq!(rewrite_skip_existing_error(bare), bare);
+    }
+
+    #[test]
+    fn botgate_rewrite_appends_the_cookies_pointer() {
+        let real = "ERROR: [youtube] jNQXAC9IVRw: Sign in to confirm you're not a bot. Use --cookies-from-browser or --cookies for the authentication.";
+        let out = rewrite_botgate_error(real);
+        assert!(out.starts_with(real));
+        assert!(out.contains("advanced → cookies → from browser"));
+        // non-auth errors stay untouched
+        let other = "ERROR: [generic] x: Unable to download webpage";
+        assert_eq!(rewrite_botgate_error(other), other);
     }
 
     #[test]

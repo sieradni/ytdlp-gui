@@ -178,6 +178,17 @@ export const jobRemove = (id: string) => invoke<void>("job_remove", { id });
  * (renderer has no fs access; the dialog plugin opens, not probes). */
 export const fileExists = (path: string) => invoke<boolean>("file_exists", { path });
 export const queueList = () => invoke<Job[]>("queue_list");
+
+/** d60: which urls would overwrite existing destination files if queued
+ * now (single-video mode only; playlists are excluded by design). the
+ * composer offers the same overwrite/cancel dialog the history gate does. */
+export interface OverwriteTarget {
+  url: string;
+  name: string;
+  dest: string;
+}
+export const overwriteTargets = (urls: string[], playlistSingle: boolean, skipDownloaded: boolean) =>
+  invoke<OverwriteTarget[]>("overwrite_targets", { urls, playlistSingle, skipDownloaded });
 export const queuePause = () => invoke<boolean>("queue_pause");
 export const queueResume = () => invoke<boolean>("queue_resume");
 

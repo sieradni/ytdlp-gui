@@ -24,6 +24,22 @@ pub struct Memo(pub Mutex<HashMap<String, Result<ResolvedIdentity, String>>>);
 
 const MEMO_CAP: usize = 256;
 
+/// memoized resolve for other commands (d60's overwrite gate): same
+/// normalization + cap discipline as the tauri command above.
+pub(crate) async fn resolve_memoized(memo: &Memo, url: &str) -> Result<ResolvedIdentity, String> {
+    let key = crate::engine::queue::normalize_url_public(url);
+    if let Some(cached) = memo.0.lock().expect("memo lock").get(&key).cloned() {
+        return cached;
+    }
+    let result = probe(&key).await;
+    let mut m = memo.0.lock().expect("memo lock");
+    if m.len() >= MEMO_CAP {
+        m.clear(); // bounded: the oldest entries are the coldest anyway
+    }
+    m.insert(key, result.clone());
+    result
+}
+
 #[tauri::command]
 pub async fn metadata_resolve(
     memo: tauri::State<'_, Memo>,

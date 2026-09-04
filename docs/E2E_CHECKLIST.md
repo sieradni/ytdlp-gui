@@ -5,11 +5,16 @@ expected result. a scenario is green only when the expected result is observed
 in the real app (`pnpm tauri dev` or an installed build) — never inferred from
 code reading.
 
-coverage preamble: the rust unit suites (53 tests) cover the parser, the
+coverage preamble: the rust unit suites (59 tests) cover the parser, the
 options→argv builder, checksum parsing, and intake normalization; the ts/vitest
 layer §10 sketched was never built (note below). this checklist therefore
 covers the integration surfaces units cannot reach: real yt-dlp processes,
 real network, real filesystem, real ipc.
+
+automated runner: `node scripts/e2e/run.cjs` drives these scenarios in the
+real app over cdp (see `--list`). `--smoke` runs the youtube-independent
+subset (S9/S10/S12/S14/S18/S19) — use it when youtube is bot-gating the
+machine; a full run still requires youtube scenarios to be runnable.
 
 ## prerequisites
 
@@ -42,6 +47,7 @@ real network, real filesystem, real ipc.
 | 16 | restart normalization (D35) | download two jobs, kill the app mid-run, relaunch | running/post jobs are stopped, queued stay queued, nothing auto-resumes; history intact |
 | 17 | app update path (post-key) | after the minisign key ships, tag v0.0.1 and launch the installed previous build | banner appears with the new version; update & restart installs and relaunches; settings version shows the new runtime version |
 | 18 | re-download overwrite gate (D59) | with a downloaded file present, set composer options, history ↻ on its row: cancel the "file already exists" dialog, then repeat and accept | cancel: nothing queues, "re-download cancelled" hint shows; accept: new job with `--force-overwrites` runs clean and the file's mtime advances |
+| 19 | queue-time overwrite gate (D59/D60) | paste a url whose file already exists in the destination, press queue: cancel the dialog, then repeat and accept | cancel: nothing queues, "queueing cancelled" feedback shows; accept: job queued with `--force-overwrites`, runs clean, mtime advances. a slow/unreachable url must never stall the queue click (2.5s probe cap, D60) |
 
 ## notes
 
