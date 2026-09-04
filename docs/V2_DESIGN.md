@@ -505,6 +505,15 @@ appVersion(): { app, ytDlp, ffmpeg }
 
 - `release.yml` on tag `v*`: tauri-action builds NSIS, signs updater artifacts,
   creates GH Release with `latest.json`. cargo + pnpm caching.
+  - **proven live** (v2.0.0-alpha.2, 2026-09-04): full NSIS build on
+    windows-latest, installer attached, prerelease flag keeps
+    `releases/latest` (the future updater endpoint) clean (404).
+    run #1 exposed a real pipeline bug before any user could: pnpm 11
+    defaults `strictDepBuilds: true` and replaced `onlyBuiltDependencies`
+    with the `allowBuilds` map — the old key was silently unread and the
+    frozen-lockfile install hard-errored on esbuild's postinstall.
+    migrated to `allowBuilds`, pinned CI to pnpm 11.25.0, reproduced
+    locally via `pnpm install --frozen-lockfile`, re-tagged green (9m39s).
 - Optional nightly build artifact for testers.
 - Quality gates: `cargo clippy -D warnings`, `cargo fmt --check`, `tsc --noEmit`,
   ESLint/Prettier.

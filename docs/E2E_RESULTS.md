@@ -21,3 +21,29 @@
   was exercised through the same `history_relink` ipc the 🔍 button invokes,
   and the row-state transitions (moved? → locate… → healed → 📁) were verified in the ui.
 - scenario 17 (app update path) is out of scope until the minisign key lands (D56).
+
+
+---
+
+## addendum — upgrades round (2026-09-04, later)
+
+youtube is bot-gating this machine (transient, confirmed via manual
+yt-dlp outside the app), so the youtube-tagged scenarios could not run
+this round. instead the suite's new `--smoke` mode (all
+youtube-independent scenarios) ran green, and two new gate scenarios
+were added and verified through the real native rfd dialog:
+
+| # | scenario | result | evidence |
+|---|---|---|---|
+| 18 | re-download overwrite gate (D59) | PASS | cancel: dialog=clicked:invoke, hint=true, jobs queued=0; grant: job done, options.overwrite=true (db), mtime advanced |
+| 19 | queue-time overwrite gate (D59/D60) | PASS | cancel: dialog=clicked:invoke, "queueing cancelled" feedback, jobs queued=0; grant: job done, options.overwrite=true, mtime advanced |
+
+smoke subset S9/S10/S12/S14 also green this round (S9 after the D60 fix:
+the queue-time gate stalled the queue click ~20s on the unreachable
+intranet url — now raced with a 2.5s cap; the D28 feedback/textarea
+assertions had to poll, a pre-gate single-shot read was stale by design).
+
+**release-pipeline proof (upgrade 4):** tag v2.0.0-alpha.2 — release run
+#1 failed at the pnpm 11 strictDepBuilds gate (allowBuilds migration +
+CI pnpm pin, reproduced locally), re-tag run passed in 9m39s with the
+NSIS installer attached and prerelease keeping `releases/latest` clean.
