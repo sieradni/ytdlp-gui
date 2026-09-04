@@ -567,6 +567,7 @@ impl JobQueue {
                 .await;
             }
             RunOutcome::Error(msg) => {
+                let msg = rewrite_skip_existing_error(&msg);
                 self.finalize(&id, JobState::Error, Some(msg)).await;
             }
             RunOutcome::Done {
@@ -1152,9 +1153,37 @@ pub fn normalize_url_public(raw: &str) -> String {
     }
 }
 
+/// d59 hardening: a fresh queue onto an EXISTING target is unreachable by
+/// the history gate (the file isn't linked to any row yet) — yt-dlp then
+/// skips the download AND the postprocessors, and the always-on
+/// --embed-metadata pass fails on a cover-tagged file with the cryptic
+/// "Postprocessing: Conversion failed!" (e2e-reproduced). rewrite the error
+/// into the action the user actually needs. matching only this specific
+/// signature keeps genuine conversion failures honest.
+fn rewrite_skip_existing_error(msg: &str) -> String {
+    let lower = msg.to_lowercase();
+    if lower.contains("has already been downloaded") && lower.contains("conversion failed") {
+        "the target file already exists and yt-dlp skipped the download, so its post-processors ran on the old file and failed. re-download with “overwrite” from history (↻), move the existing file, or change the output template.".into()
+    } else {
+        msg.to_owned()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn skip_existing_rewrite_matches_only_the_full_signature() {
+        let real = "ERROR: Postprocessing: Conversion failed! (caused by ffprobe/ffmpeg)\n[download] Me at the zoo [jNQXAC9IVRw].opus has already been downloaded";
+        assert!(rewrite_skip_existing_error(real).starts_with("the target file already exists"));
+        // a genuine conversion failure (no skip line) stays untouched
+        let genuine = "ERROR: Postprocessing: Conversion failed!";
+        assert_eq!(rewrite_skip_existing_error(genuine), genuine);
+        // a bare skip (archive hit) stays untouched
+        let bare = "[download] x.opus has already been downloaded";
+        assert_eq!(rewrite_skip_existing_error(bare), bare);
+    }
 
     #[test]
     fn intake_normalizes_scheme_less_and_flags_non_links() {
