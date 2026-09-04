@@ -41,6 +41,7 @@ real network, real filesystem, real ipc.
 | 15 | pause never kills (D34) | pause the queue while a job downloads | running job keeps downloading; no new jobs dispatch; resume resumes dispatch |
 | 16 | restart normalization (D35) | download two jobs, kill the app mid-run, relaunch | running/post jobs are stopped, queued stay queued, nothing auto-resumes; history intact |
 | 17 | app update path (post-key) | after the minisign key ships, tag v0.0.1 and launch the installed previous build | banner appears with the new version; update & restart installs and relaunches; settings version shows the new runtime version |
+| 18 | re-download overwrite gate (D59) | with a downloaded file present, set composer options, history ↻ on its row: cancel the "file already exists" dialog, then repeat and accept | cancel: nothing queues, "re-download cancelled" hint shows; accept: new job with `--force-overwrites` runs clean and the file's mtime advances |
 
 ## notes
 

@@ -120,6 +120,8 @@ export interface JobOptions {
   playlistMode: PlaylistMode;
   playlistN: number;
   skipDownloaded: boolean;
+  /** D59: explicit overwrite grant for re-downloads onto existing files. */
+  overwrite: boolean;
   cookies: CookieSource;
   subtitleLangs: string[];
   autoCaptions: boolean;
@@ -172,6 +174,9 @@ export const jobAdd = (urls: string[], options: JobOptions, destination?: string
 export const jobStop = (id: string) => invoke<void>("job_stop", { id });
 export const jobRetry = (id: string) => invoke<void>("job_retry", { id });
 export const jobRemove = (id: string) => invoke<void>("job_remove", { id });
+/** D59: server-side existence probe for the re-download confirm gate
+ * (renderer has no fs access; the dialog plugin opens, not probes). */
+export const fileExists = (path: string) => invoke<boolean>("file_exists", { path });
 export const queueList = () => invoke<Job[]>("queue_list");
 export const queuePause = () => invoke<boolean>("queue_pause");
 export const queueResume = () => invoke<boolean>("queue_resume");

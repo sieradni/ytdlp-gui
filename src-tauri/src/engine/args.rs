@@ -106,6 +106,10 @@ pub struct JobOptions {
     pub playlist_mode: PlaylistMode,
     pub playlist_n: u32,
     pub skip_downloaded: bool,
+    /// re-download onto an existing file must be explicit (D59): default
+    /// false keeps yt-dlp's "has already been downloaded" skip; history's
+    /// ↻ sets true only after a user confirms overwriting the old file.
+    pub overwrite: bool,
     pub cookies: CookieSource,
     /// subtitle languages, empty = none (D39).
     pub subtitle_langs: Vec<String>,
@@ -130,6 +134,7 @@ impl Default for JobOptions {
             playlist_mode: PlaylistMode::Single,
             playlist_n: 10,
             skip_downloaded: true,
+            overwrite: false,
             cookies: CookieSource::default(),
             subtitle_langs: Vec::new(),
             auto_captions: false,
@@ -152,6 +157,21 @@ const ENGINE_FLAGS: &[&str] = &[
     "download:__P__%(progress.downloaded_bytes)s|%(progress.total_bytes_estimate)s|%(progress.speed)s|%(progress.eta)s",
     "--print",
     "after_move:filepath",
+    // per-item playlist index print (e2e find, 2026-09-03): the console
+    // "[download] Downloading item N of M" line is SUPPRESSED when a
+    // download: progress-template is active, so the parser never saw a
+    // total. this print fires per item on a different output branch and
+    // delivers index|effective-total|full-playlist-size; n_entries is the
+    // one to display (already clamped by --playlist-end for first-n).
+    // single videos print NA — the engine ignores those.
+    "--print",
+    "pre_process:__I__%(playlist_index)s|%(n_entries)s|%(playlist_count)s",
+    // playlist-level total print: fires ONCE per playlist run even when
+    // every item is archive-skipped (e2e find: pre_process doesn't fire for
+    // skips, so a fully-archived playlist would otherwise end with no
+    // counter at all). %(playlist_count)s is the FULL size; __I__ refines.
+    "--print",
+    "playlist:__T__%(playlist_count)s",
 ];
 
 /// build the argv for one job. `archive` = Some(path) when skip-downloaded is
@@ -227,13 +247,32 @@ pub fn build_argv(
                 }
                 .into(),
             );
-            push_cover_args(&mut argv, opts.cover_mode, opts.cover_w, opts.cover_h)?;
+            // webm cannot hold embedded cover art (yt-dlp's thumbnail
+            // embedder supports mp3/mkv/ogg/opus/flac/m4a/mp4 only) — the
+            // composer warns "cover art will be skipped", so the engine must
+            // actually skip. live-verified e2e 2026-09-03: emitting
+            // --embed-thumbnail for a webm target makes yt-dlp ERROR in
+            // postprocessing ("Supported filetypes for thumbnail embedding
+            // are: …") instead of skipping, killing the whole job.
+            if opts.container != VideoContainer::Webm {
+                push_cover_args(&mut argv, opts.cover_mode, opts.cover_w, opts.cover_h)?;
+            }
         }
     }
 
     // metadata embed is part of the identity of a "finished" download in the
     // mockup's preview; keep parity with it.
     argv.push("--embed-metadata".into());
+
+    // D59: with the target file present, yt-dlp skips the download AND every
+    // postprocessor, then --embed-metadata runs its metadata pass over the
+    // cover-tagged file — which errors for opus ("Postprocessing: Conversion
+    // failed!", 0-byte .temp file, live-reproduced in e2e). the ui gates
+    // overwrite behind an explicit confirm; when granted, yt-dlp redownloads
+    // and re-embeds from scratch instead of skip-then-fail.
+    if opts.overwrite {
+        argv.push("--force-overwrites".into());
+    }
 
     if !opts.subtitle_langs.is_empty() {
         argv.push("--sub-langs".into());
@@ -278,6 +317,25 @@ pub fn build_argv(
     // user-owned, passed as-is (§7 security: still argv, never a shell).
     argv.extend(opts.extra_args.iter().cloned());
 
+    Ok(argv)
+}
+
+/// full download argv: build_argv + the url appended LAST — after any user
+/// extra_args, so a user flag that takes a value can never swallow the url
+/// and leave yt-dlp with zero positional arguments (exit 2). regression:
+/// the engine previously passed build_argv's output straight to spawn and
+/// every download failed with "You must provide at least one URL" — found
+/// live by the e2e checklist run (2026-09-03); the TS argv preview is a
+/// separate builder, which is why nothing else caught it.
+pub fn build_download_argv(
+    opts: &JobOptions,
+    url: &str,
+    dest: &str,
+    archive: Option<&str>,
+    ffmpeg_dir: Option<&str>,
+) -> AppResult<Vec<String>> {
+    let mut argv = build_argv(opts, dest, archive, ffmpeg_dir)?;
+    argv.push(url.to_owned());
     Ok(argv)
 }
 
@@ -401,10 +459,12 @@ mod tests {
     fn playlist_modes() {
         let mut o = base_audio();
         o.playlist_mode = PlaylistMode::All;
+        // no --playlist-* flags in All mode (the __I__ print's template
+        // fields mention playlist_*, but those aren't flags)
         assert!(!build_argv(&o, "d", None, None)
             .unwrap()
             .iter()
-            .any(|a| a.contains("playlist")));
+            .any(|a| a.starts_with("--playlist")));
         o.playlist_mode = PlaylistMode::FirstN;
         o.playlist_n = 25;
         let argv = build_argv(&o, "d", None, None).unwrap();
@@ -489,5 +549,29 @@ mod tests {
         // absent managed ffmpeg → no flag (custom yt-dlp may find its own)
         let argv2 = build_argv(&base_audio(), r"C:\dl", None, None).unwrap();
         assert!(!argv2.join(" ").contains("--ffmpeg-location"));
+    }
+
+    #[test]
+    fn download_argv_appends_url_last_after_user_extras() {
+        // regression for the e2e-launched "no url" break: the url must be
+        // the final argument, even when user extra_args end the argv.
+        let mut o = base_audio();
+        o.extra_args = vec!["--verbose".into()];
+        let argv = build_download_argv(&o, "https://example.com/v", "d", None, None).unwrap();
+        assert_eq!(argv.last().unwrap(), "https://example.com/v");
+    }
+
+    #[test]
+    fn overwrite_flag_requires_opt_in_and_flips_to_force_overwrites() {
+        // D59: default is yt-dlp's native "already downloaded" skip (no
+        // --force-overwrites); the explicit overwrite grant flips the flag so
+        // the job redownloads + re-embeds instead of skip-then-fail
+        // (--embed-metadata over a cover-tagged opus errors, e2e-reproduced).
+        let argv = build_argv(&base_audio(), "d", None, None).unwrap();
+        assert!(!argv.join(" ").contains("--force-overwrites"));
+        let mut o = base_audio();
+        o.overwrite = true;
+        let argv2 = build_argv(&o, "d", None, None).unwrap();
+        assert!(argv2.contains(&"--force-overwrites".to_string()));
     }
 }

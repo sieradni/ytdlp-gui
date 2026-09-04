@@ -32,3 +32,7 @@ src-tauri/gen/schemas
 *.njsproj
 *.sln
 *.sw?
+
+# e2e run artifacts (real downloads land here; runner logs)
+/e2e-dl/
+/e2e-run.log

@@ -22,10 +22,19 @@ pub enum ParsedLine {
     Title(String),
     /// a playlist item started: `[download] <id>: ...` destination lines.
     ItemStart { id: String },
-    /// yt-dlp's playlist counter: `[download] Downloading item 3 of 12`.
-    /// authoritative for the total; items done are counted from completions
-    /// (FinalPath) + archive skips (PlaylistSkip) — see D54.
-    PlaylistCounter { done: u32, total: u32 },
+    /// `__I__<index>|<effective-total>|<full-playlist-size>` from the
+    /// engine's pre_process print (e2e find, 2026-09-03: the console
+    /// "Downloading item N of M" line is suppressed under a download:
+    /// progress-template, so this print is the counter). fires once per
+    /// item; NA totals are ignored (single videos). effective-total =
+    /// n_entries, already clamped for first-n.
+    PlaylistItemIndex { index: u32, total: u32 },
+    /// `__T__<count>` from the engine's playlist-level print — fires once
+    /// per playlist run EVEN when every item is archive-skipped (e2e find:
+    /// pre_process doesn't fire for skips, so this is the only total signal
+    /// there). count = %(playlist_count)s, the FULL playlist size; the
+    /// per-item __I__ print refines it to the clamped total.
+    PlaylistTotal { total: u32 },
     /// `[download] <id>: <title> has already been recorded in the archive`.
     /// a skipped playlist item — counts as processed (D54).
     PlaylistSkip { id: String },
@@ -60,21 +69,30 @@ pub fn parse_line(raw: &str) -> ParsedLine {
         return ParsedLine::FinalPath(t.to_owned());
     }
 
-    // ---- playlist counter: `[download] Downloading item N of M` ----
-    if let Some(rest) = t.strip_prefix("[download] Downloading item ") {
-        let mut it = rest.split_whitespace();
-        // "N of M"
-        let done = it.next().and_then(|v| v.parse::<u32>().ok());
-        let total = it
-            .next()
-            .filter(|w| *w == "of")
-            .and_then(|_| it.next())
-            .and_then(|v| v.parse::<u32>().ok());
-        if let (Some(done), Some(total)) = (done, total) {
-            return ParsedLine::PlaylistCounter { done, total };
+    // ---- engine's playlist-level print: __T__<count> (fires even when
+    //      every item is archive-skipped; see args.rs) ----
+    if let Some(rest) = t.strip_prefix("__T__") {
+        if let Ok(total) = rest.trim().parse::<u32>() {
+            return ParsedLine::PlaylistTotal { total };
         }
     }
 
+    // ---- engine's per-item playlist print: __I__<idx>|<total>|<full> ----
+    if let Some(rest) = t.strip_prefix("__I__") {
+        let mut it = rest.split('|');
+        let index = it.next().and_then(|v| v.trim().parse::<u32>().ok());
+        let total = it.next().and_then(|v| v.trim().parse::<u32>().ok());
+        if let Some(total) = total {
+            return ParsedLine::PlaylistItemIndex {
+                index: index.unwrap_or(0),
+                total,
+            };
+        }
+    }
+
+    // ---- playlist counter via the engine's per-item print (see args.rs:
+    //      the console "[download] Downloading item N of M" line is
+    //      suppressed under a download: progress-template) ----
     // ---- [download] Destination: / [Merger] / [ExtractAudio] etc ----
     if let Some(rest) = t.strip_prefix("[download] Destination:") {
         return ParsedLine::Destination(rest.trim().to_owned());
@@ -287,22 +305,29 @@ mod tests {
     }
 
     #[test]
-    fn playlist_counter_line() {
-        match parse_line("[download] Downloading item 3 of 12") {
-            ParsedLine::PlaylistCounter { done, total } => {
-                assert_eq!((done, total), (3, 12));
-            }
+    fn playlist_item_index_print_parses_effective_total() {
+        // engine's pre_process print (e2e find 2026-09-03): index|total|full,
+        // where total = n_entries (clamped for first-n). verbatim live shapes.
+        match parse_line("__I__1|2|10") {
+            ParsedLine::PlaylistItemIndex { index, total } => assert_eq!((index, total), (1, 2)),
             other => panic!("wrong parse: {other:?}"),
         }
-        // malformed counters stay plain lines, never mis-parse
-        assert!(matches!(
-            parse_line("[download] Downloading item x of 12"),
-            ParsedLine::Line(_)
-        ));
-        assert!(matches!(
-            parse_line("[download] Downloading item 3 of"),
-            ParsedLine::Line(_) | ParsedLine::ItemStart { .. }
-        ));
+        match parse_line("__I__10|10|10") {
+            ParsedLine::PlaylistItemIndex { index, total } => assert_eq!((index, total), (10, 10)),
+            other => panic!("wrong parse: {other:?}"),
+        }
+        // single videos: index/total NA → ignored (falls through)
+        assert!(matches!(parse_line("__I__NA|NA|NA"), ParsedLine::Line(_)));
+    }
+
+    #[test]
+    fn playlist_level_total_print_parses() {
+        match parse_line("__T__10") {
+            ParsedLine::PlaylistTotal { total } => assert_eq!(total, 10),
+            other => panic!("wrong parse: {other:?}"),
+        }
+        // NA (single videos don't emit the line at all, but be safe)
+        assert!(matches!(parse_line("__T__NA"), ParsedLine::Line(_)));
     }
 
     #[test]

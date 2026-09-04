@@ -1,0 +1,1165 @@
+//! e2e checklist runner (docs/E2E_CHECKLIST.md scenarios 1-16).
+//! drives the REAL tauri app (debug build + vite dev server) over cdp —
+//! real ipc, real yt-dlp processes, real network. assertions poll engine
+//! truth via in-page `invoke()` (window.__TAURI_INTERNALS__.invoke), NOT
+//! dom scraping; dom is only used to perform ui actions and verify ui-only
+//! surfaces (warnings, feedback, hover card, flash).
+//!
+//! usage: node scripts/e2e/run.js [--only 1,4,13] [--list]
+//! results are printed as a table and written to docs/E2E_RESULTS.md.
+
+const fs = require("fs");
+const path = require("path");
+const { launchAndAttach, waitFor, evalAsync: rawEval, sleep, pressKey } = require("./cdp.cjs");
+
+/** retrying evaluate: the vite dev client reloads the page at least once
+ * shortly after launch, which throws "page threw" from any in-flight eval.
+ * ui-driving and read-only evals are idempotent, so retry with bundle
+ * re-injection. */
+async function evalAsync(ws, expr, retries = 5) {
+  for (let i = 0; ; i++) {
+    try {
+      return await rawEval(ws, expr);
+    } catch (e) {
+      const retryable = /page threw|timed out|context/i.test(e.message);
+      if (i >= retries || !retryable) throw e;
+      await sleep(700);
+      try { await ensureBundle(); } catch { /* still reloading */ }
+    }
+  }
+}
+
+const PORT = 9333;
+const EXE = path.resolve(__dirname, "../../src-tauri/target/debug/ytdlp-gui.exe");
+const DL_DIR = path.resolve(__dirname, "../../e2e-dl");
+
+// stable, live test targets (probed 2026-09 with the staged yt-dlp 2026.08.19)
+const ZOO = "https://www.youtube.com/watch?v=jNQXAC9IVRw"; // 19s, ~2MB
+const ZOO_SHORT = "https://youtu.be/jNQXAC9IVRw"; // same video, different url (S5)
+const TYCHO = "https://tycho.bandcamp.com/album/dive"; // 10-track album
+const SC_FLICKER = "https://soundcloud.com/forss/flickermood"; // single-format audio
+const GARBAGE = "not a url";
+const INTRANET = "http://192.168.1.1/x";
+const DEAD = "https://www.youtube.com/watch?v=xxxxxxxxxxx"; // unavailable
+const DESPACITO_W = "https://www.youtube.com/watch?v=kJQP7kiw5Fk";
+const DESPACITO_S = "https://youtu.be/kJQP7kiw5Fk"; // same video, different url (S5)
+const GANGNAM = "https://www.youtube.com/watch?v=9bZkp7q19f0";
+const BBB = "https://www.youtube.com/watch?v=aqz-KE-bpKQ"; // 4k, big/slow (S15/16)
+
+// ---------------------------------------------------------------------------
+// page-side helper bundle (injected once per page load)
+// ---------------------------------------------------------------------------
+const BUNDLE = `(() => {
+  const $$ = (s) => [...document.querySelectorAll(s)];
+  window.__e2e = {
+    ipc: (cmd, args) => window.__TAURI_INTERNALS__.invoke(cmd, args ?? {}),
+    tabs: () => $$('.tab-btn').map(b => ({ t: b.textContent.trim(), on: b.classList.contains('active') })),
+    goto: (name) => { const b = $$('.tab-btn').find(x => x.textContent.trim() === name); if (!b) return false; b.click(); return true; },
+    composer: () => document.querySelector('.card-b textarea'),
+    focusComposer: () => { const el = document.querySelector('.card-b textarea'); if (!el) return false; el.focus(); return true; },
+    clickText: (sel, txt, exact, token) => { const el = $$(sel).find(e => exact ? e.textContent.trim() === txt : e.textContent.trim().includes(txt)); if (!el) return false; if (token) { window.__e2e.clicks = window.__e2e.clicks || {}; if (window.__e2e.clicks[token]) return 'already'; window.__e2e.clicks[token] = 1; } el.click(); return true; },
+    setSelect: (finder, value) => { const el = $$('.card select').find(finder); if (!el) return false; el.value = value; el.dispatchEvent(new Event('change', { bubbles: true })); return true; },
+    containerSelect: () => $$('.card select').find(s => [...s.options].some(o => o.value === 'webm')) ?? null,
+    firstNInput: () => $$('.card input[type=text]').find(i => i.style.width === '54px') ?? null,
+    skipToggle: () => $$('.card label.toggle input')[0] ?? null,
+    anyWarn: (needle) => $$('.card .warn').some(w => w.textContent.toLowerCase().includes(needle)),
+    feedbackText: () => { const d = $$('.card-b > div').find(x => x.textContent.includes('invalid')); return d ? d.textContent : null; },
+    rows: () => $$('tr.qrow').map(r => ({ status: r.dataset.status, flash: r.dataset.flash ?? null, title: r.querySelector('.t-title')?.textContent ?? '', meta: r.querySelector('.t-meta')?.textContent ?? '' })),
+    rowByMeta: (needle) => $$('tr.qrow').find(r => r.querySelector('.t-meta')?.textContent.includes(needle) || r.querySelector('.t-title')?.textContent.includes(needle)) ?? null,
+    clickRowBtn: (row, title) => { if (!row) return false; const b = [...row.nextElementSibling?.querySelectorAll('button') ?? [], ...row.querySelectorAll('button')].find(x => x.title === title); if (!b) return false; b.click(); return true; },
+    expandRow: (row) => { if (!row) return false; const t = row.querySelector('.t-title'); if (!t) return false; t.click(); return true; },
+    hoverRow: (row) => { if (!row) return false; row.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })); return true; },
+    hoverCard: () => document.querySelector('.hovercard-shown')?.textContent ?? null,
+    flashSeen: () => $$('tr.qrow[data-flash="done"]').length > 0,
+    key: (sel, key, opts = {}) => { const el = typeof sel === 'string' ? document.querySelector(sel) : sel; if (!el) return false; el.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true, ctrlKey: !!opts.ctrl, shiftKey: !!opts.shift })); return true; },
+    activeIsComposer: () => document.activeElement === document.querySelector('.card-b textarea'),
+    clearComposer: () => { const b = $$('.card button.ghost').find(x => x.textContent.trim() === 'clear'); if (!b) return false; b.click(); return true; },
+    queueRowsMeta: () => $$('tr.qrow .t-meta').map(m => m.textContent),
+    // drive composer controls then VERIFY against the react-rendered dom
+    // (classes/values derive from the same opts state that feeds the D19
+    // mirror history's re-download consumes). a plain fire-and-forget dom
+    // edit can silently no-op across react remounts / vite reloads — s15/s16
+    // queued with stale options in round 5. note: importing Composer.tsx to
+    // read currentOptions does NOT work — vite hmr means the dynamic import
+    // resolves to a second module instance whose mirror never updates
+    // (verified live, round 5 probes).
+    applyOpts: async (partial) => {
+      const $$ = (s) => [...document.querySelectorAll(s)];
+      const zzz = (ms) => new Promise((r) => setTimeout(r, ms));
+      try {
+        if (partial.dlType !== undefined) {
+          const b = $$('.card .seg button').find((x) => x.textContent.trim() === partial.dlType);
+          if (!b) return 'no-' + partial.dlType + '-seg';
+          if (!b.classList.contains('on')) {
+            b.click();
+            await zzz(200);
+            if (!b.classList.contains('on')) return 'seg-no-commit';
+          }
+        }
+        const audioMode = $$('.card .seg button').find((x) => x.textContent.trim() === 'audio')?.classList.contains('on');
+        const finders = {
+          audioFormat: audioMode ? (s) => [...s.options].some((o) => o.value === 'mp4container') : null,
+          maxResolution: (s) => [...s.options].some((o) => o.value === '2160p'),
+          container: (s) => [...s.options].some((o) => o.value === 'webm'),
+          audioPref: (s) => s.options.length === 2 && s.options[0].value === 'opus',
+        };
+        for (const key of Object.keys(finders)) {
+          if (partial[key] === undefined) continue;
+          const f = finders[key];
+          if (!f) return key + '-select-only-exists-in-audio-mode';
+          const el = $$('.card select').find(f);
+          if (!el) return 'no-' + key + '-select';
+          if (el.value !== partial[key]) {
+            el.value = partial[key];
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+            await zzz(150);
+            if (el.value !== partial[key]) return key + '-no-commit';
+          }
+        }
+        if (partial.skipDownloaded !== undefined) {
+          const t = $$('.card label.toggle input')[0];
+          if (!t) return 'no-skip-toggle';
+          if (t.checked !== partial.skipDownloaded) {
+            t.click();
+            await zzz(150);
+            if (t.checked !== partial.skipDownloaded) return 'skip-no-commit';
+          }
+        }
+        return 'ok';
+      } catch (e) { return 'applyOpts threw: ' + e.message; }
+    },
+  };
+  return true;
+})()`;
+
+// ---------------------------------------------------------------------------
+// node-side helpers
+// ---------------------------------------------------------------------------
+let ws;
+const results = [];
+
+function record(n, name, pass, details) {
+  results.push({ n, name, pass, details });
+  console.log(`  ${pass ? "PASS" : "FAIL"}  [S${n}] ${name}`);
+  for (const d of details) console.log(`        · ${d}`);
+}
+
+/** poll an ipc call until pred(value) is truthy */
+async function waitIpc(cmd, pred, { timeoutMs = 30000, everyMs = 400, label = "" } = {}) {
+  const t0 = Date.now();
+  let last = null;
+  while (Date.now() - t0 < timeoutMs) {
+    try {
+      await ensureBundle();
+      const v = await evalAsync(ws, `window.__e2e.ipc(${JSON.stringify(cmd)})`);
+      last = v;
+      if (pred(v)) return v;
+    } catch (e) {
+      last = `eval error: ${e.message}`;
+    }
+    await sleep(everyMs);
+  }
+  throw new Error(`waitIpc timeout (${timeoutMs}) ${cmd} ${label} — last=${JSON.stringify(last)?.slice(0, 400)}`);
+}
+
+async function jobs() {
+  await ensureBundle();
+  return evalAsync(ws, `window.__e2e.ipc('queue_list')`);
+}
+async function history() {
+  await ensureBundle();
+  return evalAsync(ws, `window.__e2e.ipc('history_list')`);
+}
+async function jobBy(urLSubstring) {
+  const js = await jobs();
+  return js.filter((j) => j.url.includes(urLSubstring));
+}
+
+/** wait until a job matching urlSub reaches state; returns the job */
+async function waitJob(urlSub, state, timeoutMs = 60000, everyMs = 400) {
+  return waitIpc(
+    "queue_list",
+    (v) => v.some((j) => j.url.includes(urlSub) && j.state === state),
+    { timeoutMs, everyMs, label: `url~${urlSub} state=${state}` },
+  ).then(() => jobs().then((js) => js.find((j) => j.url.includes(urlSub) && j.state === state)));
+}
+
+/** queue url(s) through the composer ui and press the button (not enter).
+ * insertText drives react's onChange; the native-setter fallback covers any
+ * event-synthesis gap. the textarea is CLEARED first — scenarios leave text
+ * behind (s9 keeps the accepted intranet url by design; s10 appended to it
+ * and fetched both). */
+async function queueViaComposer(url) {
+  await evalAsync(ws, `(() => { const i = window.__e2e.composer(); if (!i) throw new Error('composer not found — wrong page?'); const p = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set; p.call(i, ''); i.dispatchEvent(new Event('input', { bubbles: true })); return true; })()`);
+  await sleep(100);
+  await evalAsync(ws, `window.__e2e.focusComposer()`);
+  await ws.call("Input.insertText", { text: url });
+  await sleep(150);
+  const got = await evalAsync(ws, `window.__e2e.composer()?.value ?? ''`);
+  if (!got.includes(url.slice(8, 40))) {
+    // fallback: set + dispatch like a real edit
+    await evalAsync(ws, `(() => { const i = window.__e2e.composer(); if (!i) throw new Error('composer not found — wrong page?'); const p = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set; p.call(i, ${JSON.stringify(url)}); i.dispatchEvent(new Event('input', { bubbles: true })); return true; })()`);
+    await sleep(120);
+  }
+  await evalAsync(ws, `window.__e2e.clickText('.card button.primary', 'queue downloads', true)`);
+  await sleep(250);
+}
+
+/** run a scenario fn, catching failures into the results table.
+ * the bundle is re-injected per scenario — the page can reload between
+ * scenarios, which would silently drop window.__e2e. every scenario also
+ * returns home first: several scenarios leave the app on another tab, and
+ * composer evals on the wrong page fail with "illegal invocation"
+ * (documented in docs/E2E_RESULTS.md). */
+async function scenario(n, name, fn) {
+  console.log(`\n=== S${n}: ${name} ===`);
+  try {
+    await evalAsync(ws, `window.__e2e.goto('home') ? 'ok' : 'no-home-tab'`);
+    await sleep(200);
+    await ensureBundle();
+    await fn();
+  } catch (e) {
+    record(n, name, false, [`threw: ${e.message}`]);
+  }
+}
+
+async function injectBundle() {
+  await rawEval(ws, BUNDLE);
+}
+
+/** the vite dev client can reload the page shortly after launch, wiping
+ * window.__e2e — every helper self-heals by re-injecting when it's gone. */
+async function ensureBundle() {
+  const t = await evalAsync(ws, `typeof window.__e2e`);
+  if (t !== "object") await injectBundle();
+}
+
+// ---------------------------------------------------------------------------
+// scenarios
+// ---------------------------------------------------------------------------
+
+/** poll until an in-page predicate eval returns truthy. blind sleeps race
+ * react mounts (s8's silent no-op cascade) — every ui step that returns
+ * false must be awaited through this, not trusted. */
+async function evalUntil(expr, { timeoutMs = 15000, everyMs = 250, label = "" } = {}) {
+  const t0 = Date.now();
+  let last = null;
+  while (Date.now() - t0 < timeoutMs) {
+    last = await evalAsync(ws, expr);
+    // retry on falsy AND on string sentinels that describe intermediate
+    // states — sentinels are truthy, so ('no-row'/'pending'/'NOBTN:…') used
+    // to short-circuit the poll on its first probe: every "polled" step was
+    // single-shot in disguise (the entire solo-vs-full flake family traced
+    // here, e2e round 8).
+    const pending = last == null || last === false || last === "false"
+      || (typeof last === "string" && (last === "pending" || last.startsWith("no-") || last.startsWith("NOBTN:")));
+    if (!pending) return last;
+    await sleep(everyMs);
+  }
+  throw new Error(`evalUntil timeout (${timeoutMs}) ${label} — last=${JSON.stringify(last)}`);
+}
+
+/** drive composer controls and VERIFY via the live D19 mirror — a silent
+ * dom no-op queued stale options in rounds 4/5; this fails fast instead. */
+async function setOpts(partial) {
+  // retried: applyOpts can run before the composer has mounted (fresh app
+  // boot hydration in s16) — a single-shot call reported no-skip-toggle and
+  // poisoned the scenario (found live, e2e round 8).
+  const t0 = Date.now();
+  let last = null;
+  while (Date.now() - t0 < 15000) {
+    last = await evalAsync(ws, `window.__e2e.applyOpts(${JSON.stringify(partial)})`);
+    if (last === "ok") return last;
+    await sleep(300);
+  }
+  throw new Error(`setComposer failed: ${JSON.stringify(last)}`);
+}
+
+const S = {};
+
+// 1 — single video, app defaults (audio/best), real download
+S[1] = async () => {
+  const details = [];
+  let flashSeen = false;
+  // watch for the one-shot flash while the job runs
+  const flashPoll = (async () => {
+    for (let i = 0; i < 200; i++) {
+      try {
+        if (await evalAsync(ws, `window.__e2e.flashSeen()`)) { flashSeen = true; return; }
+      } catch { /* page busy */ }
+      await sleep(200);
+    }
+  })();
+
+  await queueViaComposer(ZOO);
+  const q = await waitJob("jNQXAC9IVRw", "fetching", 20000);
+  details.push(`fetching observed (title=${q.title ?? "…"})`);
+  await waitJob("jNQXAC9IVRw", "downloading", 20000);
+  details.push("downloading observed");
+  await waitJob("jNQXAC9IVRw", "post", 30000).catch(() => details.push("(post phase not observed — fast job)"));
+  const done = await waitJob("jNQXAC9IVRw", "done", 60000);
+  clearInterval(flashPoll);
+  details.push(`done: finalPath=${done.finalPath}, pct=${done.pct}`);
+  if (flashSeen) details.push("row flash (data-flash=done) captured");
+  const file = done.finalPath && fs.existsSync(done.finalPath);
+  details.push(`file exists at finalPath: ${file}`);
+  const hist = await history();
+  const row = hist.find((h) => (h.url ?? "").includes("jNQXAC9IVRw"));
+  details.push(`history row: ${row ? `${row.extractor} ${row.vid} "${row.title}" size=${row.sizeBytes} dur=${row.durationSec}` : "MISSING"}`);
+  const acc = await evalAsync(ws, `window.__e2e.rows().some(r => r.status === 'done')`);
+  details.push(`done row carries data-status=done (accent): ${acc}`);
+  record(1, "single video end-to-end", !!(done.finalPath && file && row && acc), details);
+};
+
+// 4 — duplicate of archived item re-queues to done/skipped, no re-download
+S[4] = async () => {
+  const details = [];
+  const before = (await history()).length;
+  // capture pre-existing jobs for this url — waitJob must match a NEW job,
+  // not the stale done record from S1 (queue_list includes finished jobs)
+  const priorIds = new Set((await jobBy("jNQXAC9IVRw")).map((j) => j.id));
+  const t0 = Date.now();
+  await queueViaComposer(ZOO);
+  const done = await waitIpc(
+    "queue_list",
+    (v) => v.some((j) => j.url.includes("jNQXAC9IVRw") && !priorIds.has(j.id) && j.state === "done"),
+    { timeoutMs: 30000, everyMs: 300, label: "new zoo job done" },
+  ).then((v) => v.find((j) => j.url.includes("jNQXAC9IVRw") && !priorIds.has(j.id) && j.state === "done"));
+  const elapsed = Date.now() - t0;
+  details.push(`new job ${done.id}: state=done skipped=${done.skipped} in ${elapsed}ms`);
+  details.push(`error/meta: ${done.error ?? "(none)"}`);
+  const logHit = done.output.some((l) => l.toLowerCase().includes("skipping (archive)"));
+  details.push(`log says archive-skip: ${logHit}`);
+  const after = (await history()).length;
+  details.push(`history rows before/after: ${before}/${after} (no duplicate row: ${before === after})`);
+  record(4, "archived duplicate → done/skipped", done.skipped === true && elapsed < 20000 && before === after && logHit, details);
+};
+
+// 3 — playlist first n=2 (runs BEFORE S2 so items 1-2 download fresh)
+S[3] = async () => {
+  const details = [];
+  await evalAsync(ws, `window.__e2e.clickText('.card .seg button', 'entire playlist', true)`);
+  await evalAsync(ws, `window.__e2e.clickText('.card .seg button', 'first n…', true)`);
+  const inp = await evalAsync(ws, `window.__e2e.firstNInput() ? 'ok' : null`);
+  if (!inp) throw new Error("first-n input not found");
+  await evalAsync(ws, `(() => { const i = window.__e2e.firstNInput(); const p = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set; p.call(i, '2'); i.dispatchEvent(new Event('input', { bubbles: true })); return true; })()`);
+  await queueViaComposer(TYCHO);
+  const done = await waitJob("tycho.bandcamp.com", "done", 120000, 500);
+  details.push(`itemsDone=${done.itemsDone} itemsTotal=${done.itemsTotal} skipped=${done.skipped}`);
+  // after_move:filepath prints the bare path value — count path-shaped lines
+  const finals = done.output.filter((l) => !l.startsWith("[") && /[\\/]/.test(l) && l.length > 8).length;
+  details.push(`bare final-path prints in output: ${finals}`);
+  const files = fs.existsSync(DL_DIR) ? fs.readdirSync(DL_DIR).filter((f) => f.toLowerCase().endsWith(".mp3") || f.toLowerCase().endsWith(".m4a") || f.toLowerCase().endsWith(".flac")) : [];
+  details.push(`audio files in dl dir: ${files.length}`);
+  record(3, "playlist first-n=2", done.itemsDone === 2 && done.itemsTotal === 2, details);
+};
+
+// 2 — entire playlist: second pass over the album (items 1-2 already in the
+// archive from S3) — yt-dlp skips those, downloads 3-10, counter shows 10/10
+// with per-item skips + downloads BOTH counted (D54).
+S[2] = async () => {
+  const details = [];
+  await evalAsync(ws, `window.__e2e.clickText('.card .seg button', 'entire playlist', true)`);
+  const priorIds = new Set((await jobBy("tycho.bandcamp.com")).map((j) => j.id));
+  await queueViaComposer(TYCHO);
+  const isNew = (j) => j.url.includes("tycho") && !priorIds.has(j.id);
+  // sample the counter mid-run
+  let midSample = null;
+  try {
+    await waitIpc("queue_list", (v) => {
+      const j = v.find((x) => isNew(x) && x.itemsTotal != null && (x.itemsDone ?? 0) >= 2 && x.state !== "done");
+      if (j) { midSample = j; return true; }
+      return false;
+    }, { timeoutMs: 120000, everyMs: 300, label: "mid counter" });
+  } catch { /* may run too fast to catch mid */ }
+  if (midSample) details.push(`mid-run counter: ${midSample.itemsDone}/${midSample.itemsTotal} (state=${midSample.state})`);
+  else details.push("(job too fast to sample mid-run — final counter only)");
+  const done = await waitIpc("queue_list", (v) => v.some((x) => isNew(x) && x.state === "done"), { timeoutMs: 240000, everyMs: 500, label: "new tycho done" })
+    .then((v) => v.find(isNew));
+  details.push(`final: itemsDone=${done.itemsDone} itemsTotal=${done.itemsTotal}`);
+  const skips = done.output.filter((l) => l.includes("has already been recorded in the archive") || l.includes("has already been downloaded")).length;
+  const dls = done.output.filter((l) => !l.startsWith("[") && /[\\/]/.test(l) && l.length > 8).length;
+  details.push(`per-item outputs: ${dls} downloaded + ${skips} archive-skips (items 1-2 from S3)`);
+  // engine truth: counter closed to 10/10. per-item lines only exist for
+  // DOWNLOADS — yt-dlp prints nothing for archive-skips under the engine's
+  // progress-template (e2e find 2026-09-03), so the visible split here is
+  // "8 downloaded + 2 silent skips"; the done-closure guarantees the
+  // 10/10. tangible check: the album is fully on disk across both runs.
+  const dlsReported = dls;
+  const silentSkips = 10 - dlsReported;
+  details.push(`downloaded lines: ${dlsReported}; silent archive-skips: ${silentSkips}`);
+  const audioOnDisk = fs.existsSync(DL_DIR)
+    ? fs.readdirSync(DL_DIR).filter((f) => /\.(mp3|m4a|flac|opus)$/i.test(f)).length
+    : 0;
+  details.push(`audio files on disk across S3+S2: ${audioOnDisk}/10`);
+  record(2, "entire playlist counter", done.itemsDone === 10 && done.itemsTotal === 10 && audioOnDisk >= 10, details);
+};
+
+// 9 — lenient intake: garbage rejected at intake, intranet accepted + errors at fetch
+S[9] = async () => {
+  const details = [];
+  await evalAsync(ws, `window.__e2e.focusComposer()`);
+  await ws.call("Input.insertText", { text: `${GARBAGE}\n${INTRANET}` });
+  await sleep(150);
+  await evalAsync(ws, `window.__e2e.clickText('.card button.primary', 'queue downloads', true)`);
+  await sleep(400);
+  const fb = await evalAsync(ws, `window.__e2e.feedbackText()`);
+  details.push(`intake feedback: ${JSON.stringify(fb)}`);
+  const textareaVal = await evalAsync(ws, `window.__e2e.composer()?.value ?? ''`);
+  details.push(`textarea kept the accepted intranet url, dropped garbage: ${JSON.stringify(textareaVal)}`);
+  const err = await waitJob("192.168.1.1", "error", 60000, 500);
+  details.push(`intranet job state=error: ${JSON.stringify(err.error)}`);
+  const fbOk = fb && fb.includes("1 invalid") && fb.includes(GARBAGE);
+  const errOk = err.error && /unsupported|error|unable|no video|failed/i.test(err.error);
+  record(9, "lenient intake (D28)", !!(fbOk && errOk && textareaVal.includes("192.168.1.1") && !textareaVal.includes(GARBAGE)), details);
+};
+
+// 10 — soundcloud single-format audio with -f ba/b fallback
+S[10] = async () => {
+  const details = [];
+  await queueViaComposer(SC_FLICKER);
+  const done = await waitJob("soundcloud.com/forss/flickermood", "done", 120000, 500);
+  details.push(`done: finalPath=${done.finalPath}`);
+  const file = done.finalPath && fs.existsSync(done.finalPath);
+  details.push(`file exists: ${file}`);
+  const ext = done.finalPath ? path.extname(done.finalPath) : "?";
+  details.push(`landed extension: ${ext}`);
+  const hist = await history();
+  const row = hist.find((h) => (h.url ?? "").includes("flickermood"));
+  details.push(`history row: ${row ? `${row.extractor} ${row.vid}` : "MISSING"}`);
+  record(10, "single-format audio fallback", !!(file && row), details);
+};
+
+// 12 — unavailable video: error with yt-dlp reason, expandable output, hover card
+S[12] = async () => {
+  const details = [];
+  await queueViaComposer(DEAD);
+  const err = await waitJob("xxxxxxxxxxx", "error", 60000, 400);
+  details.push(`error text: ${JSON.stringify(err.error)}`);
+  const row = await evalAsync(ws, `window.__e2e.rowByMeta('xxxxxxxxxxx') ? 'found' : null`);
+  // expand output
+  // expand via the row's dedicated "output" chevron (title="output"),
+  // not a synthetic .t-title click (react didn't register those reliably)
+  await evalAsync(ws, `(() => { const r = [...document.querySelectorAll('tr.qrow')].find(x => x.querySelector('.t-meta')?.textContent.includes('xxxxxxxxxxx')); if (!r) return false; const b = [...r.querySelectorAll('button')].find(b => b.title === 'output'); if (!b) return false; b.click(); return true; })()`);
+  await sleep(300);
+  const logLines = await evalAsync(ws, `(() => { const r = [...document.querySelectorAll('tr.qrow')].find(x => x.querySelector('.t-meta')?.textContent.includes('xxxxxxxxxxx')); return r && r.nextElementSibling?.classList.contains('log-row') ? r.nextElementSibling.querySelectorAll('.logwrap > div').length : 0; })()`);
+  details.push(`expanded log lines: ${logLines}`);
+  // hover card
+  await evalAsync(ws, `(() => { const r = [...document.querySelectorAll('tr.qrow')].find(x => x.querySelector('.t-meta')?.textContent.includes('xxxxxxxxxxx')); if (r) r.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })); return true; })()`);
+  await sleep(900);
+  const card = await evalAsync(ws, `window.__e2e.hoverCard()`);
+  details.push(`hover card shows error: ${card ? JSON.stringify(card.slice(0, 160)) : "MISSING"}`);
+  record(12, "unavailable video error surface", !!(err.error && logLines > 0 && card && card.includes(err.error.slice(0, 30))), details);
+};
+
+// 11 — webm container warning appears BEFORE queueing; download still works
+S[11] = async () => {
+  const details = [];
+  // video + webm container + skip off — driven and VERIFIED via the d19
+  // mirror (single-shot evals no-op silently at scenario boundaries).
+  // the old waitJob(url, "done") matched ANY done zoo job — s1/s4 leave done
+  // rows behind, and the round-11 evidence line (.opus on the webm scenario)
+  // proves the match was s1's stale job: a false pass. assert the scenario's
+  // actual claim: a NEW job landing a .webm file.
+  await setOpts({ dlType: "video", container: "webm", skipDownloaded: false });
+  const priorIds = new Set((await jobBy("jNQXAC9IVRw")).map((j) => j.id));
+  const warn = await evalUntil(`(() => window.__e2e.anyWarn('webm') ? 'yes' : 'pending')()`, { timeoutMs: 8000, label: "webm warning" });
+  details.push(`webm warning visible before queueing: ${warn === "yes"}`);
+  await queueViaComposer(ZOO);
+  const doneList = await waitIpc("queue_list", (v) => v.some((j) => j.url.includes("jNQXAC9IVRw") && !priorIds.has(j.id) && j.state === "done" && (j.finalPath ?? "").endsWith(".webm") && !(j.error ?? "")), { timeoutMs: 90000, everyMs: 500, label: "new .webm done" });
+  const doneJob = doneList.find((j) => j.url.includes("jNQXAC9IVRw") && !priorIds.has(j.id) && (j.finalPath ?? "").endsWith(".webm"));
+  details.push(`done: finalPath=${doneJob.finalPath}`);
+  const file = fs.existsSync(doneJob.finalPath);
+  details.push(`file exists: ${file}`);
+  record(11, "webm warning + download", !!(warn === "yes" && file), details);
+};
+
+// 13 — enter queues + clears; shift+enter inserts newline, does not queue.
+// uses REAL cdp key events (Input.dispatchKeyEvent): a synthetic
+// KeyboardEvent has no default action, so shift+enter could never insert
+// the newline — the runner mistook harness physics for an app defect.
+S[13] = async () => {
+  const details = [];
+  const before = (await jobs()).length;
+  await evalAsync(ws, `window.__e2e.focusComposer()`);
+  await ws.call("Input.insertText", { text: ZOO });
+  await sleep(150);
+  await pressKey(ws, { key: "Enter", code: "Enter", keyCode: 13, text: "\r" });
+  await sleep(400);
+  const queuedJob = await waitJob("jNQXAC9IVRw", "done", 30000).catch(() => null);
+  const cleared = await evalAsync(ws, `window.__e2e.composer()?.value ?? 'x'`);
+  details.push(`enter queued a job (zoo, skip→instant): ${queuedJob ? "yes" : "no"}; textarea cleared: ${cleared === ""}`);
+  // shift+enter: two lines, no queue
+  const countAfterEnter = (await jobs()).length;
+  await evalAsync(ws, `window.__e2e.focusComposer()`);
+  await ws.call("Input.insertText", { text: "line one" });
+  await sleep(100);
+  await pressKey(ws, { key: "Enter", code: "Enter", keyCode: 13, text: "\r", modifiers: 8 });
+  await sleep(300);
+  const val = await evalAsync(ws, `window.__e2e.composer()?.value ?? ''`);
+  const countAfterShift = (await jobs()).length;
+  details.push(`shift+enter: value=${JSON.stringify(val)}; job count before/after: ${countAfterEnter}/${countAfterShift}`);
+  await evalAsync(ws, `window.__e2e.clearComposer()`);
+  // cleanup: remove the instant-skip zoo job to keep the queue tidy
+  const zooJobs = await jobBy("jNQXAC9IVRw");
+  for (const j of zooJobs.filter((x) => x.state === "done")) {
+    await evalAsync(ws, `window.__e2e.ipc('job_remove', { id: ${JSON.stringify(j.id)} })`);
+  }
+  record(13, "enter / shift+enter (D58)", !!(queuedJob && cleared === "" && countAfterEnter === countAfterShift && val.includes("\n")), details);
+};
+
+// 14 — ctrl+v jumps home + focuses composer; F5 reloads history
+S[14] = async () => {
+  const details = [];
+  await evalAsync(ws, `window.__e2e.goto('history')`);
+  await sleep(300);
+  await evalAsync(ws, `document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'v', ctrlKey: true, bubbles: true, cancelable: true }))`);
+  await sleep(300);
+  const tabs = await evalAsync(ws, `JSON.stringify(window.__e2e.tabs())`);
+  const focused = await evalAsync(ws, `window.__e2e.activeIsComposer()`);
+  details.push(`after ctrl+v: tabs=${tabs} composerFocused=${focused}`);
+  await evalAsync(ws, `window.__e2e.goto('history')`);
+  await sleep(400);
+  const histBefore = (await history()).length;
+  await evalAsync(ws, `document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'F5', bubbles: true, cancelable: true }))`);
+  await sleep(400);
+  const histAfter = (await history()).length;
+  const rowsRendered = await evalAsync(ws, `document.querySelectorAll('.card table tbody tr').length`);
+  details.push(`F5 on history: rows ipc before/after=${histBefore}/${histAfter}, rendered rows=${rowsRendered}`);
+  record(14, "ctrl+v / F5", !!(focused && tabs.includes('"home"') && histBefore === histAfter && rowsRendered > 0), details);
+};
+
+// 8 — history re-download uses the composer's CURRENT options (D19/D52)
+S[8] = async () => {
+  const details = [];
+  const sweepZooFiles = async () => {
+    // remove pre-existing final files: with the target present, yt-dlp skips
+    // the download AND extractaudio, and the engine's always-on --embed-metadata
+    // then runs ffmpeg's ogg muxer over the cover-tagged opus — which ffmpeg
+    // refuses ("Unsupported codec id in stream 1") → "Postprocessing:
+    // Conversion failed!" + 0-byte .temp.opus (reproduced live, e2e finding:
+    // re-download onto an existing cover-tagged opus errors at the yt-dlp
+    // layer; the scenario deletes it to test the D19 options contract itself).
+    for (const f of fs.existsSync(DL_DIR) ? fs.readdirSync(DL_DIR) : []) {
+      if (f.includes("jNQXAC9IVRw") && !f.endsWith(".part")) { // any zoo artifact — s1 can land .webm or .opus (format availability fluctuates)
+        fs.rmSync(path.join(DL_DIR, f), { force: true });
+      }
+    }
+    // the same edge from an unexpected destination: an earlier run (or the v1
+    // migration adopting v1's download dir) can leave a cover-tagged .opus at
+    // whatever destination the app resolves — re-download onto it errors
+    // (existing-target edge, reproduced live). the ipc command is the truth,
+    // not the seeded setting.
+    try {
+      const dest = await evalAsync(ws, `window.__e2e.ipc('settings_get').then(s => s.destination)`);
+      if (dest && fs.existsSync(dest)) {
+        for (const f of fs.readdirSync(dest)) {
+          if (f.includes("jNQXAC9IVRw") && !f.endsWith(".part")) { // any zoo artifact — s1 can land .webm or .opus (format availability fluctuates)
+            fs.rmSync(path.join(dest, f), { force: true });
+          }
+        }
+      }
+    } catch { /* settings_get unavailable — sweep below still applies */ }
+  };
+  // the whole setup→click→verify cycle is one retry unit: a vite dev reload
+  // between setOpts and the click resets the D19 mirror to defaults
+  // (skipDownloaded: true) — the re-download was then archive-skipped and the
+  // wait matched nothing (round 11: clicked=true, job done, "already in
+  // downloaded archive"). every attempt re-asserts the mirror; a skipped or
+  // errored attempt is removed and retried.
+  let done = null;
+  let attemptsLog = [];
+  for (let attempt = 1; attempt <= 3 && !done; attempt++) {
+    await ensureBundle();
+    // setup is itself retryable: s8 runs directly after s14's F5 (real page
+    // reload), and the composer may still be unmounted when the segment poll
+    // expires ("no-audio-seg", found live) — a thrown setOpts here used to
+    // unwind the whole attempt loop.
+    let set = false;
+    for (let r = 0; r < 3 && !set; r++) {
+      try { await setOpts({ dlType: "audio", audioFormat: "opus", skipDownloaded: false }); set = true; }
+      catch { await sleep(2500); await ensureBundle(); }
+    }
+    if (!set) { details.push(`attempt ${attempt}: composer never mounted for setOpts`); continue; }
+    await evalUntil(`(() => { window.__e2e.goto('history'); return document.querySelector('.tab-btn.active')?.textContent.trim() === 'history' ? 'ok' : 'pending'; })()`, { timeoutMs: 8000, label: `history active (s8 a${attempt})` });
+    // D33 quiescence: an in-flight job with the same identity rejects the
+    // re-download as duplicate (round 5).
+    await waitIpc("queue_list", (v) => v.every((j) => !["fetching", "downloading", "post"].includes(j.state)), { timeoutMs: 90000, everyMs: 400, label: "queue quiet before ↻" });
+    await sweepZooFiles();
+    const priorIds = new Set((await jobBy("jNQXAC9IVRw")).map((j) => j.id));
+    // click ↻ (title mentions current composer settings) on the zoo row —
+    // self-healing navigation: a reload can remount home, whose queue rows
+    // match the same url text with different buttons (round 9's NOBTN dump).
+    // the per-attempt token keeps a lost-response retry from clicking twice.
+    const clicked = await evalUntil(`(() => { if (!document.querySelector('.tab-btn.active')?.textContent.trim().includes('history')) return 'pending'; const r = [...document.querySelectorAll('.card table tbody tr')].find(x => x.textContent.includes('jNQXAC9IVRw') || x.textContent.includes('Me at the zoo')); if (!r) return 'no-row'; const b = [...r.querySelectorAll('button')].find(b => (b.title ?? '').startsWith('download again')); if (!b) return 'pending'; window.__e2e.clicks = window.__e2e.clicks || {}; if (window.__e2e.clicks['s8-redl-' + ${attempt}]) return 'pending'; window.__e2e.clicks['s8-redl-' + ${attempt}] = 1; b.click(); return true; })()`, { timeoutMs: 12000, everyMs: 300, label: `↻ click a${attempt}` }).catch(() => null);
+    if (!clicked) { details.push(`attempt ${attempt}: click never landed`); await ensureBundle(); continue; }
+    // match only a NEW job — s1 already left a done job for this url, and
+    // queue_list includes finished jobs (an unfixed match is a false pass)
+    let result = null;
+    try {
+      result = await waitIpc("queue_list", (v) => {
+        const nz = v.filter((j) => j.url.includes("jNQXAC9IVRw") && !priorIds.has(j.id));
+        return nz.some((j) => (j.state === "done" && (j.finalPath ?? "").endsWith(".opus")) || j.state === "error" || (j.state === "done" && j.skipped));
+      }, { timeoutMs: 120000, everyMs: 500, label: "re-download outcome" });
+    } catch { result = null; }
+    if (!result) { details.push(`attempt ${attempt}: no job outcome within 120s`); continue; }
+    const nz = result.filter((j) => j.url.includes("jNQXAC9IVRw") && !priorIds.has(j.id));
+    const okJob = nz.find((j) => j.state === "done" && (j.finalPath ?? "").endsWith(".opus") && !j.skipped && !(j.error ?? ""));
+    const badJob = nz.find((j) => j.state === "error" || (j.state === "done" && j.skipped));
+    if (okJob) { done = okJob; details.push(`attempt ${attempt}: re-download landed .opus → ${okJob.finalPath}`); break; }
+    if (badJob) {
+      attemptsLog.push(`${badJob.state}${badJob.error ? ": " + badJob.error.slice(0, 60) : ""}`);
+      details.push(`attempt ${attempt}: ${badJob.state}${badJob.error ? " — " + badJob.error.slice(0, 80) : ""} → removing + retrying with re-asserted mirror`);
+      await evalAsync(ws, `window.__e2e.ipc('job_remove', { id: ${JSON.stringify(badJob.id)} })`);
+      await sleep(500);
+    }
+  }
+  if (!done) {
+    const q = await jobs();
+    const zoo = q.filter((j) => j.url.includes("jNQXAC9IVRw")).map((j) => `${j.id.slice(-6)}=${j.state}${j.error ? " err=" + j.error.slice(0, 60) : ""}`);
+    const hist = await history();
+    const zooRows = hist.filter((h) => h.vid === "jNQXAC9IVRw").map((h) => `${h.finalPath?.split("\\").pop()} url=${h.url ? "yes" : "NO"}`);
+    throw new Error(`re-download never landed .opus in 3 attempts (attempts: ${attemptsLog.join("; ") || "none"}) || zooJobs=[${zoo.join(" | ")}] zooHistory=[${zooRows.join("; ")}]`);
+  }
+  details.push(`file exists: ${fs.existsSync(done.finalPath)}`);
+  record(8, "D19 re-download uses composer options", !!(done && fs.existsSync(done.finalPath)), details);
+};
+
+// 7 — moved file: reveal fails → moved? + locate… → relink restores reveal
+S[7] = async () => {
+  const details = [];
+  // verified navigation (same lesson as s8: an unchecked goto can leave the
+  // queue table mounted and starve the reveal-click poll below).
+  await evalUntil(`(() => { window.__e2e.goto('history'); return document.querySelector('.tab-btn.active')?.textContent.trim() === 'history' ? 'ok' : 'pending'; })()`, { timeoutMs: 8000, label: "history tab active (s7)" });
+  // pre-clean: if a previous attempt left the row in moved state or relinked
+  // to the [moved] path, restore db + disk to the original name first — the
+  // scenario must start from a KNOWN-normal row (a stale moved? state or a
+  // missed click silently starves the poll below; found live, e2e round 6).
+  const pre = await history();
+  const preRow = pre.find((h) => h.vid === "jNQXAC9IVRw");
+  if (preRow && !preRow.finalPath.includes("[moved]")) {
+    // already normal
+  } else if (preRow) {
+    const orig = preRow.finalPath.replace(" [moved]", "");
+    if (fs.existsSync(preRow.finalPath)) fs.renameSync(preRow.finalPath, orig);
+    await evalAsync(ws, `window.__e2e.ipc('history_relink', { id: 'youtube jNQXAC9IVRw', path: ${JSON.stringify(orig)} })`);
+    await sleep(300);
+  }
+  // find the opus row's file on disk, move it (simulating explorer move).
+  // fails FAST if s8 replaced the zoo row (webm/opus swap) — no cascade.
+  const hist = await history();
+  const row = hist.find((h) => (h.finalPath ?? "").endsWith(".opus"));
+  if (!row || !fs.existsSync(row.finalPath)) {
+    const formats = hist.filter((h) => h.vid === "jNQXAC9IVRw").map((h) => h.finalPath);
+    throw new Error(`opus file missing (s8 left: ${JSON.stringify(formats)})`);
+  }
+  const newPath = row.finalPath.replace("Me at the zoo", "Me at the zoo [moved]");
+  fs.renameSync(row.finalPath, newPath);
+  details.push(`moved file on disk → ${path.basename(newPath)}`);
+  // click 📁 (show in folder) — reveal should fail (file gone), row flips to
+  // moved?. VERIFIED click via evalUntil: a single-shot eval can fire while
+  // the row hasn't rendered (round 6: clicked=false went unnoticed, the
+  // flag never flipped, and the poll starved).
+  const clicked = await evalUntil(`(() => { window.__e2e.clicks = window.__e2e.clicks || {}; if (window.__e2e.clicks['s7-reveal']) return 'already'; const r = [...document.querySelectorAll('.card table tbody tr')].find(x => x.textContent.includes('Me at the zoo')); if (!r) return 'false'; const b = [...r.querySelectorAll('button')].find(b => (b.title ?? '').startsWith('show in folder')); if (!b) return 'false'; window.__e2e.clicks['s7-reveal'] = 1; b.click(); return 'ok'; })()`, { label: "reveal click", timeoutMs: 15000 });
+  details.push(`reveal 📁 clicked: ${clicked}`);
+  // the reveal-failure → flag flip is async (plugin round-trip; explorer
+  // spawn can be slow on a cold session) — poll generously, don't sleep.
+  // ALSO SELF-HEALING: a vite dev-client reload remounts history (losing the
+  // moved? component state and the bundle) — isolated probes prove the
+  // mechanism is deterministic (~150ms) when the page stays mounted, so a
+  // vanished flag after a remount is re-driven, not starved (found live:
+  // locate read null for 8s while the row existed before and after).
+  let movedFlag = "no";
+  let locateOffered = false;
+  for (let attempt = 1; attempt <= 3 && !locateOffered; attempt++) {
+    await ensureBundle();
+    await evalUntil(`(() => { window.__e2e.goto('history'); return document.querySelector('.tab-btn.active')?.textContent.trim() === 'history' ? 'ok' : 'pending'; })()`, { timeoutMs: 8000, label: `history active (s7 a${attempt})` });
+    const ok = await evalUntil(`(() => { const r = [...document.querySelectorAll('.card table tbody tr')].find(x => x.textContent.includes('Me at the zoo')); return r ? (r.textContent.includes('moved?') ? 'yes' : 'pending') : null; })()`, { label: `moved? flag a${attempt}`, timeoutMs: 12000 }).catch(() => null);
+    if (ok === "yes") {
+      movedFlag = "yes";
+      locateOffered = await evalUntil(`(() => { const r = [...document.querySelectorAll('.card table tbody tr')].find(x => x.textContent.includes('Me at the zoo')); return r ? ([...r.querySelectorAll('button')].some(b => (b.title ?? '').startsWith('locate'))) : null; })()`, { label: `locate offered a${attempt}`, timeoutMs: 8000 }).catch(() => false);
+      if (!locateOffered) {
+        // flag is on but the button read raced a re-render — one clean re-read
+        // after a remount-verify; if the page was reloaded the loop re-drives.
+        await sleep(400);
+        await ensureBundle();
+      }
+    } else {
+      // page remounted (flag lost) or reveal raced — re-click reveal for this
+      // attempt (token per attempt: a lost-response retry never double-fires).
+      // goto is verified INSIDE this step too: a reload between the attempt's
+      // navigation and here remounts home → no history row → 'false' forever
+      // (round 10). failure here is recoverable — the next attempt re-drives.
+      await evalUntil(`(() => { window.__e2e.goto('history'); if (document.querySelector('.tab-btn.active')?.textContent.trim() !== 'history') return 'pending'; window.__e2e.clicks = window.__e2e.clicks || {}; const t = 's7-reveal-' + ${attempt}; if (window.__e2e.clicks[t]) return 'already'; const r = [...document.querySelectorAll('.card table tbody tr')].find(x => x.textContent.includes('Me at the zoo')); if (!r) return 'pending'; const b = [...r.querySelectorAll('button')].find(b => (b.title ?? '').startsWith('show in folder')); if (!b) return 'pending'; window.__e2e.clicks[t] = 1; b.click(); return 'ok'; })()`, { label: `reveal re-click a${attempt}`, timeoutMs: 10000 }).catch(() => null);
+    }
+  }
+  if (!locateOffered) throw new Error(`moved?/locate never both visible after 3 attempts (movedFlag=${movedFlag})`);
+  details.push(`reveal failed → row shows moved? ${movedFlag}, locate… offered: ${locateOffered}`);
+  // native file dialog is not scriptable over cdp — exercise the same
+  // handler's ipc (history_relink) directly and verify the row heals
+  await evalAsync(ws, `window.__e2e.ipc('history_relink', { id: 'youtube jNQXAC9IVRw', path: ${JSON.stringify(newPath)} })`);
+  await sleep(400);
+  const healed = await history();
+  const healedRow = healed.find((h) => h.vid === "jNQXAC9IVRw");
+  details.push(`after relink: history finalPath=${healedRow.finalPath} (matches moved file: ${healedRow.finalPath === newPath})`);
+  // restore disk + db to the original state so later scenarios (and reruns)
+  // start clean: rename back, relink, remount, expect the normal 📁 row.
+  fs.renameSync(newPath, row.finalPath);
+  await evalAsync(ws, `window.__e2e.ipc('history_relink', { id: 'youtube jNQXAC9IVRw', path: ${JSON.stringify(row.finalPath)} })`);
+  // fresh history mount before the final check: the "moved?" flag is
+  // component state that only the native-dialog path clears, and the dialog
+  // is not scriptable over cdp. a REMOUNT reads db truth only — exactly what
+  // a user sees when they revisit the page (found by the e2e checklist).
+  await evalAsync(ws, `window.__e2e.goto('home') ? 'ok' : 'no'`);
+  await sleep(250);
+  await evalAsync(ws, `window.__e2e.goto('history') ? 'ok' : 'no'`);
+  await sleep(600);
+  const backToReveal = await evalAsync(ws, `(() => { const r = [...document.querySelectorAll('.card table tbody tr')].find(x => x.textContent.includes('Me at the zoo')); return r ? [...r.querySelectorAll('button')].some(b => (b.title ?? '').startsWith('show in folder')) : null; })()`);
+  details.push(`row back to 📁 (reveal state, db relinked to original): ${backToReveal}`);
+  record(7, "moved-file locate/relink (D19/§6)", !!(clicked === "ok" && movedFlag === "yes" && locateOffered && healedRow.finalPath === newPath && backToReveal), details);
+};
+
+// 5 + 6 — identity duplicate while running (concurrency=2), then stop→resume
+S[5] = async () => {
+  const details = [];
+  // composer is in audio/opus/skip-off state from S8 — set video/480p + skip ON
+  await evalAsync(ws, `window.__e2e.clickText('.card .seg button', 'video', true)`);
+  const resSel = await evalAsync(ws, `(() => { const s = [...document.querySelectorAll('.card select')].find(x => [...x.options].some(o => o.value === '2160p')); if (!s) return false; s.value = '480p'; s.dispatchEvent(new Event('change', { bubbles: true })); return true; })()`);
+  await evalAsync(ws, `(() => { const t = window.__e2e.skipToggle(); if (t && !t.checked) t.click(); return true; })()`);
+  details.push(`video mode, 480p cap set: ${resSel}, skip on`);
+  // job1 via composer (watch?v=)
+  await queueViaComposer(DESPACITO_W);
+  await waitJob("kJQP7kiw5Fk", "downloading", 45000, 400).catch(async () => {
+    await waitJob("kJQP7kiw5Fk", "fetching", 20000, 300);
+  });
+  // job2 seconds later via composer (youtu.be short link — different url, same identity)
+  await queueViaComposer(DESPACITO_S);
+  const dup = await waitJob("youtu.be/kJQP7kiw5Fk", "duplicate", 45000, 400);
+  details.push(`job2 ended duplicate: ${JSON.stringify(dup.error)}`);
+  const j1 = (await jobBy("watch?v=kJQP7kiw5Fk")).find((j) => j.state === "downloading" || j.state === "post");
+  details.push(`job1 still ${j1?.state ?? "?"} (pct=${j1?.pct?.toFixed?.(1)}%)`);
+  record(5, "identity duplicate while running", !!(dup.error && dup.error.includes("duplicate") && j1), details);
+};
+
+S[6] = async () => {
+  const details = [];
+  // bbb at BEST: big/slow enough to stop mid-flight with certainty — 480p
+  // finished in ~4s at local disk speed, racing the stop click (round 3).
+  // stop is triggered by .part byte growth, not a timer.
+  await evalAsync(ws, `window.__e2e.clickText('.card .seg button', 'video', true)`);
+  await evalUntil(`(() => { const s = [...document.querySelectorAll('.card select')].find(x => [...x.options].some(o => o.value === '2160p')); if (!s) return 'false'; s.value = 'best'; s.dispatchEvent(new Event('change', { bubbles: true })); return s.value === 'best' ? 'ok' : 'false'; })()`, { label: "best res" });
+  await evalAsync(ws, `(() => { const t = window.__e2e.skipToggle(); if (t && t.checked) t.click(); return true; })()`); // skip off: re-download allowed
+  const priorIds = new Set((await jobBy("aqz-KE-bpKQ")).map((j) => j.id));
+  await queueViaComposer(BBB);
+  await waitIpc("queue_list", (v) => v.some((j) => j.url.includes("aqz-KE-bpKQ") && !priorIds.has(j.id) && j.state === "downloading"), { timeoutMs: 90000, everyMs: 300, label: "bbb running" });
+  // stop ■ once bytes actually flow (wide window — btbN best is hundreds of mb)
+  const partsAt = () => fs.existsSync(DL_DIR) ? fs.readdirSync(DL_DIR).filter((f) => f.includes(".part")).map((f) => ({ f, s: fs.statSync(path.join(DL_DIR, f)).size })) : [];
+  const sumAt = (list) => list.reduce((a, p) => a + p.s, 0);
+  for (let i = 0; i < 200 && sumAt(partsAt()) < 15 * 1024 * 1024; i++) await sleep(250);
+  const stopped = await evalUntil(`(() => { const r = [...document.querySelectorAll('tr.qrow')].find(x => x.dataset.status === 'downloading' && x.textContent.includes('aqz-KE-bpKQ')); if (!r) return 'false'; const b = [...r.querySelectorAll('button')].find(b => (b.title ?? '').startsWith('stop')); if (!b) return 'false'; b.click(); return 'ok'; })()`, { label: "stop click" });
+  const st = await waitIpc("queue_list", (v) => v.some((j) => j.url.includes("aqz-KE-bpKQ") && !priorIds.has(j.id) && j.state === "stopped"), { timeoutMs: 30000, everyMs: 300, label: "stopped" }).then((v) => v.find((j) => !priorIds.has(j.id) && j.state === "stopped"));
+  details.push(`state=stopped: ${JSON.stringify(st.error)}`);
+  // .part kept?
+  const parts = partsAt();
+  details.push(`.part files kept: ${parts.map((p) => `${p.f} (${Math.round(p.s / 1024)}kb)`).join(", ") || "NONE"}`);
+  // retry ↻ — resume evidence: the .part GROWS (bytes continued, not restarted)
+  const sizeAtStop = parts.reduce((a, p) => a + p.s, 0);
+  // stopped rows carry the error string in meta, not the url — match by the
+  // title cell, which the engine fills from the probe/download output
+  const retried = await evalUntil(`(() => { const r = [...document.querySelectorAll('tr.qrow')].find(x => x.dataset.status === 'stopped' && x.querySelector('.t-title')?.textContent.toLowerCase().includes('buck bunny')); if (!r) return 'false'; const b = [...r.querySelectorAll('button')].find(b => (b.title ?? '') === 'retry'); if (!b) return 'false'; b.click(); return 'ok'; })()`, { label: "retry click", timeoutMs: 20000 });
+  details.push(`retry ↻ clicked: ${retried}`);
+  let sizeAfterResume = 0;
+  await waitIpc("queue_list", (v) => {
+    const j = v.find((x) => x.url.includes("aqz-KE-bpKQ") && !priorIds.has(x.id) && x.state === "downloading");
+    if (!j) return false;
+    const parts2 = partsAt();
+    sizeAfterResume = parts2.reduce((a, p) => a + p.s, 0);
+    return sizeAfterResume > sizeAtStop;
+  }, { timeoutMs: 60000, everyMs: 400, label: "resume evidence" });
+  details.push(`.part bytes at stop=${Math.round(sizeAtStop / 1024)}kb → after resume=${Math.round(sizeAfterResume / 1024)}kb (grew ⇒ continued, not restarted)`);
+  const done = await waitIpc("queue_list", (v) => v.some((x) => x.url.includes("aqz-KE-bpKQ") && !priorIds.has(x.id) && x.state === "done"), { timeoutMs: 420000, everyMs: 1000, label: "bbb done" }).then((v) => v.find((x) => !priorIds.has(x.id) && x.state === "done"));
+  const partsAfter = partsAt();
+  details.push(`done: ${done.finalPath}; .part files after: ${partsAfter.length}`);
+  record(6, "stop → resume (D31/D35 semantics)", !!(stopped && st.error && parts.length > 0 && sizeAfterResume > sizeAtStop && done.finalPath && fs.existsSync(done.finalPath) && partsAfter.length === 0), details);
+};
+
+// 15 — pause never kills (D34): running keep downloading, queued wait.
+// disk truth over ipc pct: yt-dlp's template reports NA totals for many
+// streams, so pct can stay null mid-download — .part byte growth is the
+// honest "processes still alive" signal (e2e finding 2026-09-03).
+S[15] = async () => {
+  const details = [];
+  // two best-quality jobs fill both slots (slow enough to survive the
+  // pause window); skip off so archived identities re-download. setOpts
+  // verifies via the D19 mirror — a vite reload at the scenario boundary
+  // reset the composer to audio defaults (round 5) and the 5MB .part gate
+  // could never fire.
+  await setOpts({ dlType: "video", maxResolution: "best", skipDownloaded: false });
+  details.push("mirror: video/best, skip off");
+  const priorGang = new Set((await jobBy("9bZkp7q19f0")).map((j) => j.id));
+  const priorBbb = new Set((await jobBy("aqz-KE-bpKQ")).map((j) => j.id));
+  await queueViaComposer(GANGNAM);
+  await queueViaComposer(BBB);
+  await queueViaComposer(ZOO); // the queued witness
+  const partsAt = () => fs.existsSync(DL_DIR) ? fs.readdirSync(DL_DIR).filter((f) => f.includes(".part")).map((f) => ({ f, s: fs.statSync(path.join(DL_DIR, f)).size })) : [];
+  const sumAt = (list) => list.reduce((a, p) => a + p.s, 0);
+  // gate the pause on DISK TRUTH, not a state flag: both jobs downloading
+  // AND bytes flowing (≥5MB). a state-only gate can fire during yt-dlp's
+  // metadata phase — no bytes flow yet, so the 8s window shows 0→0 and
+  // "processes untouched" is unprovable (e2e round 4).
+  await waitIpc("queue_list", (v) => {
+    const running = v.filter((j) => ((j.url.includes("aqz-KE-bpKQ") && !priorBbb.has(j.id)) || (j.url.includes("9bZkp7q19f0") && !priorGang.has(j.id))) && j.state === "downloading");
+    return running.length === 2 && sumAt(partsAt()) >= 5 * 1024 * 1024;
+  }, { timeoutMs: 150000, everyMs: 500, label: "both big jobs running + bytes flowing" });
+  details.push("both big jobs downloading, .part bytes flowing");
+  // pause — direct ipc (queue_pause is an idempotent setter, safe to retry):
+  // round 9 showed the dom button can be ABSENT right after a vite reload
+  // (store unhydrated, loaded=false) while the engine + ipc work fine; and
+  // d34's contract is the disk evidence (processes untouched), not the
+  // button. keep the returned paused flag as extra evidence.
+  const pausedFlag = await evalAsync(ws, `window.__e2e.ipc('queue_pause')`);
+  details.push(`queue_pause → paused=${pausedFlag}`);
+  const pausedState = (await jobs()).some((j) => j.state === "queued");
+  const before1 = sumAt(partsAt());
+  await sleep(8000);
+  const after1 = sumAt(partsAt());
+  const witness = (await jobs()).find((j) => j.url.includes("jNQXAC9IVRw") && j.state === "queued");
+  // a big job reaching done DURING the window is the strongest D34 proof:
+  // its yt-dlp+ffmpeg ran untouched straight through the pause (found live:
+  // at ~17MB/s both jobs finish mid-window — the .part sum hits 0, which
+  // "bytes must grow" cannot distinguish from a kill; completion can).
+  const bigDone = (await jobs()).filter((j) => ((j.url.includes("aqz-KE-bpKQ") && !priorBbb.has(j.id)) || (j.url.includes("9bZkp7q19f0") && !priorGang.has(j.id))) && j.state === "done" && !(j.error ?? ""));
+  const untouched = after1 > before1 || bigDone.length > 0;
+  details.push(`while paused 8s: .part bytes ${Math.round(before1 / 1024)}kb → ${Math.round(after1 / 1024)}kb (${after1 > before1 ? "grew ⇒ running processes untouched" : `${bigDone.length} big job(s) completed untouched ⇒ processes ran straight through the pause`}); witness still queued=${!!witness}`);
+  // resume — direct ipc, same rationale
+  const resumedFlag = await evalAsync(ws, `window.__e2e.ipc('queue_resume')`);
+  details.push(`queue_resume → paused=${resumedFlag}`);
+  const zooDispatched = await waitIpc("queue_list", (v) => v.some((j) => j.url.includes("jNQXAC9IVRw") && j.state !== "queued"), { timeoutMs: 30000, everyMs: 300, label: "zoo dispatched after resume" });
+  details.push(`after resume: witness left queued (→ ${zooDispatched.find((j) => j.url.includes("jNQXAC9IVRw"))?.state})`);
+  record(15, "pause never kills (D34)", !!(pausedFlag === true && witness && untouched), details);
+};
+
+// 16 — restart normalization (D35): kill mid-run, relaunch, verify mapping
+S[16] = async () => {
+  const details = [];
+  // a vite reload at the scenario boundary resets the composer to defaults
+  // (skip ON) — round 5's re-queues were instantly archive-skipped. mirror-
+  // verified skip-off makes S16 self-sufficient.
+  await setOpts({ skipDownloaded: false });
+  details.push("mirror: skip off (reload resets composer defaults)");
+  // ensure at least one job is still running right before the kill; if the
+  // big jobs finished, re-queue BBB (skip is off — re-download ok)
+  let running = (await jobs()).filter((j) => j.state === "downloading" || j.state === "post");
+  if (running.length === 0) {
+    // transient youtube failures happen (round 4's re-queue died in fetch);
+    // retry until a job actually reaches downloading
+    for (let attempt = 0; attempt < 3 && running.length === 0; attempt++) {
+      await queueViaComposer(BBB);
+      try {
+        running = await waitIpc("queue_list", (v) => v.some((j) => j.url.includes("aqz-KE-bpKQ") && j.state === "downloading"), { timeoutMs: 90000, everyMs: 300, label: `re-running BBB (attempt ${attempt + 1})` });
+      } catch {
+        const failed = (await jobBy("aqz-KE-bpKQ")).filter((j) => j.state === "error");
+        for (const j of failed) await evalAsync(ws, `window.__e2e.ipc('job_remove', { id: ${JSON.stringify(j.id)} })`);
+      }
+    }
+    if (running.length === 0) throw new Error("bbb never reached downloading after 3 attempts");
+  }
+  const histBefore = (await history()).length;
+  details.push(`killing app with ${running.length} running job(s); history rows=${histBefore}`);
+  // hard-kill the app process (simulates crash). only jobs RUNNING at kill
+  // time normalize to stopped — finished jobs from earlier scenarios share
+  // the same urls and must not be swept into the assertion.
+  const runningIds = new Set((await jobs()).filter((j) => j.state === "downloading" || j.state === "post").map((j) => j.id));
+  details.push(`running at kill: ${[...runningIds].length}`);
+  const { execSync } = require("child_process");
+  execSync("taskkill /IM ytdlp-gui.exe /F", { stdio: "ignore" });
+  await sleep(1500);
+  // wait until the debug port is actually FREE — a lingering webview2 host
+  // would serve a dead page and launchAndAttach would silently bind to it
+  await waitFor(ws, `true`, { timeoutMs: 1000, everyMs: 100 }).catch(() => {}); // drain old socket
+  const net2 = require("net");
+  for (let i = 0; i < 30; i++) {
+    const free = await new Promise((res) => {
+      const p = net2.connect(PORT, "127.0.0.1");
+      p.on("connect", () => { p.destroy(); res(false); });
+      p.on("error", () => res(true));
+    });
+    if (free) break;
+    await sleep(500);
+  }
+  // relaunch
+  const relaunched = await launchAndAttach(EXE, PORT);
+  ws = relaunched.ws;
+  // wait for hydration before injecting — the fresh webview loads the page
+  // asynchronously, and an early bundle lands on a blank document
+  await waitFor(ws, "document.querySelectorAll('.tab-btn').length >= 3 && window.__TAURI_INTERNALS__ ? true : null", { timeoutMs: 60000, everyMs: 400 });
+  await sleep(1500);
+  await injectBundle();
+  await sleep(800);
+  await injectBundle();
+  const after = await jobs();
+  const normalized = after.filter((j) => runningIds.has(j.id));
+  details.push(`after relaunch: ${normalized.map((j) => `${j.url.slice(-12)}=${j.state}(${j.error ?? "-"})`).join(", ")}`);
+  // D35 contract: running/post at kill → stopped("app restarted"); fetching →
+  // queued. a job that crossed into DONE before the kill landed stays done
+  // ("done" is terminal — normalization must not touch it). so the assertion
+  // is: no killed job is left in a running/post state, and every non-done
+  // killed job is stopped with the restart marker (found live: a fast
+  // finisher legitimately completed during the kill window).
+  const badState = normalized.filter((j) => ["fetching", "downloading", "post"].includes(j.state));
+  const wronglyResumed = normalized.some((j) => j.state === "downloading");
+  const nonDone = normalized.filter((j) => j.state !== "done");
+  const allStopped = nonDone.length > 0 && nonDone.every((j) => j.state === "stopped" && (j.error ?? "").includes("app restarted"));
+  const histAfter = (await history()).length;
+  details.push(`history intact: ${histBefore}/${histAfter}`);
+  // a job that was RUNNING at kill must not auto-resume; a job that was only
+  // queued legitimately dispatches on relaunch (the witness does exactly that)
+  const autoResumed = after.some((j) => runningIds.has(j.id) && j.state === "downloading");
+  details.push(`killed jobs stay stopped (no auto-resume): ${!autoResumed}`);
+  record(16, "restart normalization (D35)", !!(allStopped && badState.length === 0 && histAfter >= histBefore && !autoResumed), details);
+};
+
+// 17 — re-download overwrite gate (D59): a re-download onto an existing
+// history file must ask first; cancelling queues nothing, granting queues a
+// job with options.overwrite=true that redownloads cleanly (the ungated
+// legacy behavior errored: skip-then-embed-metadata over a cover-tagged opus
+// → "Postprocessing: Conversion failed!", 0-byte .temp, e2e-reproduced).
+// uses bandcamp (youtube is bot-gated under e2e load); the native dialog is
+// intercepted at __TAURI_INTERNALS__.invoke so module instances don't matter.
+S[18] = async () => {
+  const details = [];
+  const URL_ = "https://tycho.bandcamp.com/track/a-walk";
+  // the gate opens the REAL native dialog (rfd task dialog, titled
+  // "file already exists", custom buttons "overwrite"/"cancel"). task
+  // dialogs have no default button (Enter is inert) and rfd adds no
+  // mnemonics, so keyboard automation is unreliable — UI Automation invokes
+  // each button BY NAME instead (position-independent, no interception of
+  // the webview needed).
+  // UIA driver lives in answer-dialog.ps1 (see its header for why the real
+  // dialog is driven by name instead of intercepted); outcome words:
+  // clicked:invoke | clicked:click | btn-no-rect | dialog-not-found | exec-fail:*
+  const answerDialog = (name, timeoutMs = 15000) => {
+    try {
+      return require("child_process").execFileSync(
+        "powershell",
+        ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(__dirname, "answer-dialog.ps1"), "-Title", "file already exists", "-Name", name, "-TimeoutMs", String(timeoutMs)],
+        { encoding: "utf8", timeout: timeoutMs + 10000 },
+      ).trim();
+    } catch (e) {
+      const out = String((e.stdout ?? "") + (e.stderr ? " ERR:" + String(e.stderr).split(/\r?\n/)[0] : "")).trim();
+      return out || `exec-fail:${e.status}`;
+    }
+  };
+  // composer: audio/mp3, skip OFF (a-walk is archived by earlier scenarios)
+  await setOpts({ dlType: "audio", audioFormat: "mp3", skipDownloaded: false });
+  details.push("mirror: audio/mp3, skip off");
+  // step 1: ensure a clean initial download exists
+  let prior = new Set((await jobs()).map((j) => j.id));
+  let base = (await jobs()).find((j) => j.url.includes("tycho.bandcamp.com/track/a-walk") && j.state === "done" && !(j.error ?? ""));
+  if (!base) {
+    await evalUntil(`(() => { window.__e2e.goto('home'); return document.querySelector('.tab-btn.active')?.textContent.trim() === 'home' ? 'ok' : 'pending'; })()`, { timeoutMs: 8000, label: "home active (s18)" });
+    await queueViaComposer(URL_);
+    for (let i = 0; i < 90; i++) {
+      const js = await jobs();
+      const nz = js.filter((j) => !prior.has(j.id));
+      if (nz.length && ["done", "error"].includes(nz[0].state)) { base = nz[0]; break; }
+      await sleep(1000);
+    }
+    if (!base) throw new Error("initial download never finished");
+    prior = new Set((await jobs()).map((j) => j.id));
+  }
+  if (base.state !== "done" || (base.error ?? "")) throw new Error(`initial download not clean: ${base.state} ${base.error ?? ""}`);
+  const target = base.finalPath;
+  if (!fs.existsSync(target)) throw new Error(`initial file missing: ${target}`);
+  const mtime0 = fs.statSync(target).mtimeMs;
+  details.push(`initial download: ${path.basename(target)}`);
+  const clickRedl = async () => {
+    await evalUntil(`(() => { window.__e2e.goto('history'); return document.querySelector('.tab-btn.active')?.textContent.trim() === 'history' ? 'ok' : 'pending'; })()`, { timeoutMs: 8000, label: "history active (s18)" });
+    return evalUntil(`(() => { const r = [...document.querySelectorAll('.card table tbody tr')].find(x => x.textContent.includes('A Walk')); if (!r) return 'pending'; const b = [...r.querySelectorAll('button')].find(b => (b.title ?? '').startsWith('download again')); if (!b) return 'pending'; b.click(); return 'ok'; })()`, { timeoutMs: 12000, everyMs: 300, label: "↻ click (s18)" });
+  };
+  // step 2a: cancel — the native dialog must fire, be answered 'cancel',
+  // queue nothing, and render the cancel hint (the hint is the POSITIVE
+  // signal the gate actually executed: it renders only after ask() returned
+  // false, so a never-fired gate fails here too)
+  await clickRedl();
+  const ansA = answerDialog("cancel");
+  const hint = await evalUntil(`(() => [...document.querySelectorAll('.hint')].some(h => h.textContent.includes('re-download cancelled')) ? 'ok' : 'pending')()`, { timeoutMs: 8000, everyMs: 300, label: "cancel hint (s18)" }).catch(() => "timeout");
+  await sleep(800);
+  let after = await jobs();
+  const newAfterCancel = after.filter((j) => !prior.has(j.id));
+  details.push(`cancel: dialog=${ansA}, hint=${hint === "ok"}, jobs queued=${newAfterCancel.length}`);
+  const cancelOk = ansA.startsWith("clicked") && hint === "ok" && newAfterCancel.length === 0;
+  prior = new Set(after.map((j) => j.id));
+  // step 2b: grant — new job with overwrite=true finishing clean
+  await clickRedl();
+  const ansB = answerDialog("overwrite");
+  details.push(`grant: dialog=${ansB}`);
+  let j2 = null;
+  for (let i = 0; i < 90; i++) {
+    const js = await jobs();
+    const nz = js.filter((j) => !prior.has(j.id));
+    if (nz.length && ["done", "error", "duplicate"].includes(nz[0].state)) { j2 = nz[0]; break; }
+    await sleep(1000);
+  }
+  if (!j2) {
+    // evidence, never throw: dump the stuck state before failing the record
+    const stuck = await jobs();
+    const stuckState = stuck.filter((j) => !prior.has(j.id)).map((j) => `${j.id.slice(-6)}:${j.state}:${(j.error ?? "").slice(0, 40)}`).join(", ") || "no new jobs";
+    let probe = "probe-fail";
+    try {
+      probe = require("child_process").execFileSync("powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(__dirname, "answer-dialog.ps1"), "-Title", "file already exists", "-Name", "overwrite", "-TimeoutMs", "3000", "-Probe"], { encoding: "utf8", timeout: 15000 }).trim();
+    } catch { }
+    details.push(`TIMEOUT: new jobs=[${stuckState}], dialog ${probe}`);
+    record(18, "re-download overwrite gate (D59)", false, details);
+    return;
+  }
+  details.push(`granted job: ${j2.state}${j2.error ? " — " + j2.error.slice(0, 60) : ""}`);
+  const existsIpc = await evalAsync(ws, `window.__e2e.ipc('file_exists', { path: ${JSON.stringify(target)} })`);
+  // the real assertion: the job's PERSISTED options carry overwrite=true
+  // (queue_list doesn't expose options; the db does)
+  let ow = "?";
+  try {
+    ow = require("child_process").execSync(
+      `python -c "import sqlite3,json;con=sqlite3.connect(r'${(process.env.APPDATA + "\\\\ytdlp-gui\\\\history.db").replace(/\\/g, "/")}');r=con.execute('select options from jobs where id=?',('${j2.id}',)).fetchone();print(str(json.loads(r[0]).get('overwrite')).lower())"`,
+      { encoding: "utf8" },
+    ).trim();
+  } catch { ow = "db-err"; }
+  const mtime1 = fs.existsSync(target) ? fs.statSync(target).mtimeMs : 0;
+  details.push(`options.overwrite=${ow}; file_exists ipc=${existsIpc}; file re-downloaded (mtime advanced): ${mtime1 > mtime0}`);
+  record(18, "re-download overwrite gate (D59)", !!(cancelOk && ansB.startsWith("clicked") && j2.state === "done" && !(j2.error ?? "") && ow === "true" && existsIpc === true && mtime1 > mtime0), details);
+};
+
+// ---------------------------------------------------------------------------
+// main
+// ---------------------------------------------------------------------------
+
+/** wipe all persisted state except the staged managed binaries — every
+ * runner invocation must start deterministic: a leftover zoo job makes d33
+ * reject s1's queue as a duplicate, and a leftover second history row for
+ * the same identity breaks s7's relink targeting (both found live, solo
+ * chains reusing a dirty db). */
+function wipeState() {
+  const dir = process.env.APPDATA + "\\\\ytdlp-gui";
+  if (fs.existsSync(dir)) {
+    for (const f of fs.readdirSync(dir)) {
+      if (f === "bin") continue;
+      fs.rmSync(path.join(dir, f), { recursive: true, force: true });
+    }
+  }
+  fs.rmSync(DL_DIR, { recursive: true, force: true });
+}
+
+/** seed settings.json before launch — a run must not depend on leftover
+ * state from whatever ran before it (found live: a pre-run cleanup deleted
+ * settings.json, the app booted its default destination, and s8's re-download
+ * landed in ~/Music instead of the e2e dir, resurrecting the existing-target
+ * error edge the scenario had already fixed). */
+function seedSettings() {
+  const dir = process.env.APPDATA + "\\\\ytdlp-gui";
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(
+    path.join(dir, "settings.json"),
+    JSON.stringify({ destination: DL_DIR, concurrency: 2, wizardDismissed: true, migratedFromV1: true }, null, 2),
+  );
+}
+
+async function main() {
+  // singleton guard: a second runner attached to the same debug port
+  // interleaves scenarios with the first — silently corrupting both runs.
+  const net = require("net");
+  await new Promise((resolve, reject) => {
+    const probe = net.connect(PORT, "127.0.0.1");
+    probe.on("connect", () => {
+      probe.destroy();
+      reject(new Error(`something is already listening on :${PORT} — another runner or app instance is alive`));
+    });
+    probe.on("error", () => resolve());
+  });
+  const only = process.argv.includes("--only")
+    ? process.argv[process.argv.indexOf("--only") + 1].split(",").map(Number)
+    : null;
+  if (process.argv.includes("--fresh") || !only) wipeState();
+  const order = [1, 4, 3, 2, 9, 10, 12, 11, 13, 14, 8, 7, 5, 6, 15, 16, 18];
+  const toRun = only ? order.filter((n) => only.includes(n)) : order;
+
+  console.log(`launching real app: ${EXE} (cdp :${PORT})`);
+  seedSettings();
+  const { ws: socket } = await launchAndAttach(EXE, PORT);
+  ws = socket;
+  await sleep(1200);
+  await injectBundle();
+  // wait for react hydration + the one late vite reload to settle before
+  // any ui interaction (the reload wipes injected bundles)
+  await waitFor(ws, "document.querySelectorAll('.tab-btn').length >= 3 && window.__TAURI_INTERNALS__ ? true : null", { timeoutMs: 60000, everyMs: 400 });
+  await injectBundle();
+  await sleep(4000);
+  await injectBundle();
+  console.log("attached. running scenarios:", toRun.join(", "));
+
+  for (const n of toRun) {
+    await scenario(n, SCEN_NAMES[n], S[n]);
+  }
+
+  // results table + doc
+  const passCount = results.filter((r) => r.pass).length;
+  console.log(`\n======== RESULTS: ${passCount}/${results.length} PASS ========`);
+  for (const r of results) {
+    console.log(`S${String(r.n).padStart(2)}  ${r.pass ? "PASS" : "FAIL"}  ${r.name}`);
+  }
+  writeResultsDoc();
+  // s16 leaves orphaned yt-dlp children (the app died, not them) — reap them
+  try { require("child_process").execSync("taskkill /IM yt-dlp.exe /F", { stdio: "ignore" }); } catch { /* none running */ }
+  process.exit(0);
+}
+
+const SCEN_NAMES = {
+  1: "single video end-to-end",
+  2: "entire playlist counter",
+  3: "playlist first-n=2",
+  4: "archived duplicate → done/skipped",
+  5: "identity duplicate while running",
+  6: "stop → resume (D31/D35 semantics)",
+  7: "moved-file locate/relink",
+  8: "D19 re-download uses composer options",
+  9: "lenient intake (D28)",
+  10: "single-format audio fallback",
+  11: "webm warning + download",
+  12: "unavailable video error surface",
+  13: "enter / shift+enter (D58)",
+  14: "ctrl+v / F5",
+  15: "pause never kills (D34)",
+  16: "restart normalization (D35)",
+  18: "re-download overwrite gate (D59)",
+};
+
+function writeResultsDoc() {
+  const date = new Date().toISOString().slice(0, 10);
+  const lines = [
+    "# e2e run results (docs/E2E_CHECKLIST.md scenarios 1–16)",
+    "",
+    `- run date: ${date}`,
+    "- driver: real app (debug build + vite dev server), driven over WebView2 remote debugging",
+    "  (real ipc, real yt-dlp processes, real network; state asserted via `invoke()` engine truth)",
+    "- managed binaries: staged yt-dlp 2026.08.19 + btbN ffmpeg (%APPDATA%\\ytdlp-gui\\bin)",
+    `- results: ${results.filter((r) => r.pass).length}/${results.length} pass`,
+    "",
+    "| # | scenario | result | evidence |",
+    "|---|---|---|---|",
+    ...results.map((r) => `| ${r.n} | ${r.name} | ${r.pass ? "PASS" : "FAIL"} | ${(r.details ?? []).join("<br>")?.replace(/\|/g, "\\|") ?? ""} |`),
+    "",
+    "## notes",
+    "",
+    "- scenario 7's native file-picker dialog is not scriptable over cdp; the relink",
+    "  was exercised through the same `history_relink` ipc the 🔍 button invokes,",
+    "  and the row-state transitions (moved? → locate… → healed → 📁) were verified in the ui.",
+    "- scenario 17 (app update path) is out of scope until the minisign key lands (D56).",
+  ];
+  fs.writeFileSync(path.resolve(__dirname, "../../docs/E2E_RESULTS.md"), lines.join("\n") + "\n");
+  console.log("wrote docs/E2E_RESULTS.md");
+}
+
+main().catch((e) => {
+  console.error("runner crashed:", e);
+  if (results.length) writeResultsDoc();
+  process.exit(1);
+});

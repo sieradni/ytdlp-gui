@@ -55,8 +55,15 @@ export default function App() {
     const onKey = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key === "v") {
         useUi.getState().setPage("home");
-        const el = document.querySelector<HTMLTextAreaElement>(".card-b textarea");
-        el?.focus();
+        // the composer mounts *after* the page switch re-renders — focusing
+        // synchronously grabs nothing (found by the e2e checklist, S14).
+        // two frames: one for the react commit, one for effects to settle.
+        requestAnimationFrame(() =>
+          requestAnimationFrame(() => {
+            const el = document.querySelector<HTMLTextAreaElement>(".card-b textarea");
+            el?.focus();
+          }),
+        );
       }
     };
     window.addEventListener("keydown", onKey);

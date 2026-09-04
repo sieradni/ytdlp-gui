@@ -164,6 +164,15 @@ export const useQueue = create<QueueState>((set, get) => ({
       "job:update",
       (e) => {
         const p = e.payload;
+        // terminal states carry the authoritative row (output log included —
+        // the log event stream only covers the download phase, so fetch-phase
+        // errors and skips would otherwise render an empty expando; found by
+        // the e2e checklist, S12). reload once per terminal transition.
+        const terminal = p.state === "done" || p.state === "error" || p.state === "stopped" || p.state === "duplicate";
+        if (terminal) {
+          void get().load();
+          return;
+        }
         set((s) => ({
           jobs: s.jobs.map((j) =>
             j.id === p.id
@@ -186,6 +195,8 @@ export const useQueue = create<QueueState>((set, get) => ({
       },
     );
     const onJobLog = await listen<{ id: string; line: string }>("job:log", (e) => {
+      // the terminal reload above supersedes log-appends for terminal events;
+      // live appends stay for the streaming phases (downloading/post)
       set((s) => ({
         jobs: s.jobs.map((j) =>
           j.id === e.payload.id

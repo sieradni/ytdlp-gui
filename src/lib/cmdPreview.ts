@@ -13,6 +13,11 @@ export function buildPreviewArgs(opts: JobOptions, dest: string, archive?: strin
     "download:__P__%(progress.downloaded_bytes)s|%(progress.total_bytes_estimate)s|%(progress.speed)s|%(progress.eta)s",
   );
   argv.push("--print", "after_move:filepath");
+  // per-item playlist index print (mirrors ENGINE_FLAGS; see args.rs —
+  // the console counter line is suppressed under the progress template)
+  argv.push("--print", "pre_process:__I__%(playlist_index)s|%(n_entries)s|%(playlist_count)s");
+  // playlist-level total: fires even when every item is archive-skipped
+  argv.push("--print", "playlist:__T__%(playlist_count)s");
 
   if (archive) {
     argv.push("--download-archive", archive);
@@ -43,6 +48,8 @@ export function buildPreviewArgs(opts: JobOptions, dest: string, archive?: strin
   }
 
   argv.push("--embed-metadata");
+  // D59 mirror of engine/args.rs: explicit overwrite grant → --force-overwrites
+  if (opts.overwrite) argv.push("--force-overwrites");
 
   if (opts.subtitleLangs.length) {
     argv.push("--sub-langs", opts.subtitleLangs.join(","));

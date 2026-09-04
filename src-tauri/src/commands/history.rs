@@ -63,6 +63,15 @@ pub fn history_import_archive(
     })
 }
 
+/// D59: server-side existence probe so the re-download confirm gate can
+/// check the history row's file without giving the renderer fs access (the
+/// dialog plugin opens pickers, it does not probe). returns false for an
+/// empty/missing path — the gate must not fire on rows without a file.
+#[tauri::command]
+pub fn file_exists(path: String) -> bool {
+    !path.is_empty() && std::path::Path::new(&path).is_file()
+}
+
 /// `historyRelink(id, path)` — locate… / clear-path for moved files (§6).
 /// `id` is "extractor vid" as shown in the ui.
 #[tauri::command]

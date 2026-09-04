@@ -53,6 +53,11 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .manage(SettingsHandle(Mutex::new(settings)))
+        // history_* commands resolve Arc<Db> from managed state — it must be
+        // registered on the builder, not just handed to the queue, or every
+        // history command fails with "state not managed" (found by the e2e
+        // checklist run, 2026-09-03: the history page had been dead).
+        .manage(Arc::clone(&db))
         .manage(commands::PingState {
             count: std::sync::atomic::AtomicU64::new(0),
         })
@@ -88,6 +93,7 @@ pub fn run() {
             commands::history::history_list,
             commands::history::history_import_archive,
             commands::history::history_relink,
+            commands::history::file_exists,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

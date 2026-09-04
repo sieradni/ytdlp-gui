@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { open as openDialog, ask } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
-import { historyImportArchive, historyList, historyRelink, jobAdd, type HistoryRow } from "../lib/ipc";
+import { fileExists, historyImportArchive, historyList, historyRelink, jobAdd, type HistoryRow } from "../lib/ipc";
 import { currentOptions } from "../components/Composer";
 
 function fmtSize(bytes: number | null): string {
@@ -86,7 +86,30 @@ export default function HistoryPage() {
     // switch, so a DOM probe would wrongly report "never opened home"); it
     // holds defaults until the composer has rendered once. destination is
     // resolved by job_add from the stored setting (or the os downloads dir).
-    await jobAdd([row.url], currentOptions);
+    //
+    // D59: with the target file present, yt-dlp skips the download AND the
+    // postprocessors, then the engine's always-on --embed-metadata still runs
+    // its pass over the cover-tagged file — which errors for opus (e2e
+    // live-reproduced: "Postprocessing: Conversion failed!", 0-byte .temp).
+    // so a re-download onto an existing file is gated: probe the row's last
+    // known file server-side, confirm before overwriting (job then carries
+    // --force-overwrites and redownloads cleanly), or cancel with a hint.
+    // a different composer format resolves to a different target name, which
+    // does not collide — the probe is exact-path, so no over-asking.
+    let overwrite = false;
+    if (row.finalPath && (await fileExists(row.finalPath))) {
+      const name = row.finalPath.split(/[\\/]/).pop() ?? row.finalPath;
+      const ok = await ask(
+        `“${name}” already exists on disk.\n\nRe-download replaces it with a fresh download (metadata re-embedded) using the current composer settings.`,
+        { title: "file already exists", kind: "warning", okLabel: "overwrite", cancelLabel: "cancel" },
+      );
+      if (!ok) {
+        setImportMsg("re-download cancelled — file already exists (nothing queued)");
+        return;
+      }
+      overwrite = true;
+    }
+    await jobAdd([row.url], { ...currentOptions, overwrite });
     await load(query || undefined);
   };
 

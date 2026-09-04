@@ -12,7 +12,7 @@ use serde::Serialize;
 use tauri::Emitter;
 use tokio::sync::{mpsc, Mutex as TokioMutex};
 
-use crate::engine::args::{build_argv, JobOptions, PlaylistMode};
+use crate::engine::args::{build_download_argv, JobOptions, PlaylistMode};
 use crate::engine::parser::{parse_line, ParsedLine};
 use crate::engine::process;
 use crate::error::{other, AppResult};
@@ -382,7 +382,12 @@ impl JobQueue {
             return;
         }
         let q = Arc::clone(self);
-        tokio::spawn(async move {
+        // tauri's global runtime, NOT bare tokio::spawn: the dispatcher is
+        // started from JobQueue::new inside the tauri setup hook, which runs
+        // on the main thread outside any tokio reactor context — a bare
+        // tokio::spawn panics there ("no reactor running") and killed the
+        // app on launch. found by the e2e checklist run (2026-09-03).
+        tauri::async_runtime::spawn(async move {
             loop {
                 tokio::time::sleep(std::time::Duration::from_millis(150)).await;
                 let next = {
@@ -442,6 +447,10 @@ impl JobQueue {
         let identity = match identity {
             Ok(i) => i,
             Err(e) => {
+                // finalize() pushes the message into the job's log buffer, so
+                // the expando carries the reason once the frontend pulls
+                // queue_list (the store reloads on terminal job:update —
+                // found by the e2e checklist, S12).
                 self.finalize(&id, JobState::Error, Some(e.to_string()))
                     .await;
                 self.cleanup_running(&id, &url, None);
@@ -525,8 +534,9 @@ impl JobQueue {
         } else {
             None
         };
-        let mut argv = match build_argv(
+        let mut argv = match build_download_argv(
             &opts,
+            &url,
             &dest,
             archive_flag.as_deref(),
             ffmpeg_dir().as_deref(),
@@ -607,9 +617,27 @@ impl JobQueue {
                 row.speed_bps = None;
                 row.eta_sec = None;
                 // final playlist counts (D33) — write them unconditionally so
-                // the throttled db flush can never lose the last item.
-                row.items_done = items_done.or(row.items_done);
-                row.items_total = items_total.or(row.items_total);
+                // the throttled db flush can never lose the last item. on an
+                // exit-0 playlist run every selected item was processed
+                // (downloaded or archive-skipped — item failures exit
+                // non-zero), so the done-count closes to the total; this also
+                // repairs the all-skipped case where skips produce no
+                // parsable per-item lines (e2e find, 2026-09-03).
+                if is_playlist {
+                    if let Some(total) = items_total.or(row.items_total) {
+                        row.items_total = Some(total);
+                        row.items_done = Some(total);
+                        if items_done.unwrap_or(0) == 0 {
+                            self.push_log(
+                                &id,
+                                format!("all {total} items were already in the archive"),
+                            );
+                        }
+                    }
+                } else {
+                    row.items_done = items_done.or(row.items_done);
+                    row.items_total = items_total.or(row.items_total);
+                }
                 if final_path.is_some() {
                     row.final_path = final_path;
                 }
@@ -752,17 +780,30 @@ impl JobQueue {
                                 }
                             }
                         }
-                        ParsedLine::PlaylistCounter { done: _, total } => {
-                            // counter's N is the item being fetched now; items
-                            // done comes from our own count, total from here.
-                            items_total = Some(total);
-                            // the counter line announces the total before item
-                            // 1 — reset our count so a resumed playlist's old
-                            // count doesn't leak into this run.
-                            seen_items.clear();
-                            items_done = 0;
-                            if last_emit.elapsed().as_millis() >= 200 {
-                                last_emit = std::time::Instant::now();
+                        ParsedLine::PlaylistItemIndex { total, .. } => {
+                            // per-item print (e2e find, 2026-09-03): sets the
+                            // effective total (n_entries, already clamped for
+                            // first-n). fires BEFORE each item's completion, so
+                            // NO count reset here — that would zero done items
+                            // on every new item.
+                            if items_total != Some(total) {
+                                items_total = Some(total);
+                                let _ = self.app.emit(
+                                    "job:update",
+                                    serde_json::json!({
+                                        "id": id, "state": "downloading",
+                                        "itemsDone": items_done, "itemsTotal": total,
+                                    }),
+                                );
+                            }
+                        }
+                        ParsedLine::PlaylistTotal { total } => {
+                            // playlist-level print: the FIRST total signal, and
+                            // the only one when every item is archive-skipped
+                            // (pre_process doesn't fire for skips). __I__
+                            // refines per item, so never clobber a refined value.
+                            if items_total.is_none() {
+                                items_total = Some(total);
                                 let _ = self.app.emit(
                                     "job:update",
                                     serde_json::json!({
