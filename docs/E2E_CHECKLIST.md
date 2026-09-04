@@ -48,5 +48,6 @@ real network, real filesystem, real ipc.
 - scenario 17 is only runnable once the D56 flip is done (key + secrets +
   createUpdaterArtifacts). before that, the settings row's check-now just
   reports the endpoint state — also an expected result.
-- known deferred: history size/duration/format render "—" until D45's
-  runtime parse fills them (tracked); hover card covers playlist progress.
+- history size/duration/format columns are filled at runtime since the D45
+  close-out (ffprobe at finalize + file-extension format); rows downloaded by
+  older builds keep "—" until re-downloaded (in-place upsert by identity).

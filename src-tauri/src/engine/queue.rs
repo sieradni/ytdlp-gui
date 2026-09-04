@@ -591,17 +591,35 @@ impl JobQueue {
                         if let Err(e) = archive_append(&archive_path_from_settings(), ex, vid) {
                             self.push_log(&id, format!("archive write failed: {e}"));
                         }
-                        // history metadata write (§5.3): title/path now;
-                        // duration/size/formats fill in as D45 parsing grows.
+                        // history metadata write (§5.3). d45: duration/size
+                        // are recovered at runtime from the finished file via
+                        // the app-managed ffprobe (no network, 5s cap, all
+                        // failures → None); format is the file's own
+                        // extension (ffprobe's format_name is a muxer
+                        // registry, not what the user got).
+                        let meta = match &final_path {
+                            Some(p) => tokio::time::timeout(
+                                std::time::Duration::from_secs(8),
+                                crate::engine::probe::probe_file(std::path::Path::new(p)),
+                            )
+                            .await
+                            .unwrap_or(None),
+                            None => None,
+                        };
                         let h = crate::store::HistoryRow {
                             extractor: ex.to_owned(),
                             vid: vid.to_owned(),
                             url: Some(url.clone()),
                             title: title.clone().or_else(|| self.row(&id).title),
                             channel: None,
-                            duration_sec: None,
-                            size_bytes: None,
-                            format: None,
+                            duration_sec: meta.as_ref().and_then(|m| m.duration_sec).map(i64::from),
+                            size_bytes: meta
+                                .as_ref()
+                                .and_then(|m| m.size_bytes)
+                                .and_then(|v| i64::try_from(v).ok()),
+                            format: final_path
+                                .as_deref()
+                                .and_then(crate::engine::probe::format_label),
                             final_path: final_path.clone(),
                             error: None,
                             downloaded_at: crate::store::now_unix(),
