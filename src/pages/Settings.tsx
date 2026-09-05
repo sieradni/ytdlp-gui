@@ -2,8 +2,10 @@ import { SavedFlash } from "../components/SavedFlash";
 import ToolRow from "../components/ToolRow";
 import { useEffect, useState } from "react";
 import { getVersion } from "@tauri-apps/api/app";
+import { appResetData, type ResetReport } from "../lib/ipc";
 import { useAppUpdate } from "../lib/appUpdate";
 import { useBinaries } from "../stores/binaries";
+import { useQueue } from "../stores/queue";
 import { useSettings } from "../stores/settings";
 
 export default function SettingsPage() {
@@ -110,7 +112,81 @@ export default function SettingsPage() {
           <div className="row flex items-center">
             <span className="hint">unlicense — do whatever</span>
           </div>
+          <label>reset</label>
+          <ResetRow />
         </div>
+      </div>
+    </div>
+  );
+}
+
+/** d69: destructive reset, double-confirmed in place. removes queue,
+ * history, settings and the default-path downloaded.txt; managed binaries
+ * in bin/ always survive (re-downloadable tooling, ~150 mb) and a custom
+ * archive path is never touched (it may be the user's cross-tool archive).
+ * the archive is called out by name in the confirm — D32 spirit: nothing
+ * destructive happens silently. */
+function ResetRow() {
+  const [armed, setArmed] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [report, setReport] = useState<ResetReport | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const run = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const rep = await appResetData();
+      setReport(rep);
+      setArmed(false);
+      // the stores hold pre-reset snapshots — reload settings + queue so the
+      // ui reflects the wiped state without a restart
+      await useSettings.getState().load();
+      await useQueue.getState().load();
+    } catch (e) {
+      setError(String(e).replace(/^.*"message":"([^"]+)".*$/s, "$1"));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (report) {
+    return (
+      <div className="hint">
+        reset done — {report.jobsCleared} queued, {report.historyCleared} history,
+        settings{report.archiveRemoved ? ", downloaded.txt" : ""}
+        {report.archiveWasCustom ? " (custom archive kept)" : ""} removed. binaries kept.
+      </div>
+    );
+  }
+
+  if (!armed) {
+    return (
+      <div className="row flex items-center gap-2">
+        <button className="btn sm" onClick={() => setArmed(true)}>
+          reset app data…
+        </button>
+        <span className="hint">queue, history, settings, archive — bin/ stays</span>
+        {error && <span className="warn">{error}</span>}
+      </div>
+    );
+  }
+
+  return (
+    <div className="row flex flex-col gap-1">
+      <div className="warn">
+        ⚠ permanently deletes the queue, history, settings and downloaded.txt
+        (the download archive — re-downloading already-fetched items will
+        re-fetch them). managed yt-dlp/ffmpeg in bin/ are kept. a custom
+        archive path is never touched.
+      </div>
+      <div className="row flex items-center gap-2">
+        <button className="btn sm" disabled={busy} onClick={() => setArmed(false)}>
+          cancel
+        </button>
+        <button className="btn sm danger" disabled={busy} onClick={() => void run()}>
+          {busy ? "resetting…" : "delete everything — final confirm"}
+        </button>
       </div>
     </div>
   );

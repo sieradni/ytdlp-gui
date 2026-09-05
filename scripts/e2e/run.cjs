@@ -33,6 +33,17 @@ const PORT = 9333;
 const EXE = path.resolve(__dirname, "../../src-tauri/target/debug/ytdlp-gui.exe");
 const DL_DIR = path.resolve(__dirname, "../../e2e-dl");
 
+// d69: the suite runs the app against its own sandbox profile. the debug
+// build resolves app_data_dir() from YTDLP_GUI_DATA_DIR (see manager.rs), so
+// e2e rows/artifacts can never bleed into an installed app's profile again —
+// the alpha.2 campaign contamination was exactly that leak. the one exception
+// is bin/ provisioning below: the sandbox copies the staged managed binaries
+// out of the legacy profile on first run.
+process.env.YTDLP_GUI_DATA_DIR ||= path.join(require("os").tmpdir(), "ytdlp-gui-e2e");
+const DATA_DIR = process.env.YTDLP_GUI_DATA_DIR;
+const DATA_DIR_SQL = DATA_DIR.replace(/\\/g, "/"); // python -c paths want forward slashes
+const LEGACY_PROFILE = process.env.APPDATA + "\\\\ytdlp-gui";
+
 // stable, live test targets (probed 2026-09 with the staged yt-dlp 2026.08.19)
 const ZOO = "https://www.youtube.com/watch?v=jNQXAC9IVRw"; // 19s, ~2MB
 const ZOO_SHORT = "https://youtu.be/jNQXAC9IVRw"; // same video, different url (S5)
@@ -54,7 +65,7 @@ const SOURCE = {
   1: "youtube", 4: "youtube", 3: "youtube", 2: "youtube", 9: "other",
   10: "other", 12: "other", 11: "youtube", 13: "youtube", 14: "other",
   8: "youtube", 7: "youtube", 5: "youtube", 6: "youtube", 15: "youtube",
-  16: "youtube", 18: "other", 19: "other", 20: "other", 21: "none",
+  16: "youtube", 18: "other",  19: "other", 20: "other", 21: "none", 22: "none",
 };
 
 // ---------------------------------------------------------------------------
@@ -1057,7 +1068,7 @@ S[18] = async () => {
   let ow = "?";
   try {
     ow = require("child_process").execSync(
-      `python -c "import sqlite3,json;con=sqlite3.connect(r'${(process.env.APPDATA + "\\\\ytdlp-gui\\\\history.db").replace(/\\/g, "/")}');r=con.execute('select options from jobs where id=?',('${j2.id}',)).fetchone();print(str(json.loads(r[0]).get('overwrite')).lower())"`,
+      `python -c "import sqlite3,json;con=sqlite3.connect(r'${DATA_DIR_SQL}/history.db');r=con.execute('select options from jobs where id=?',('${j2.id}',)).fetchone();print(str(json.loads(r[0]).get('overwrite')).lower())"`,
       { encoding: "utf8" },
     ).trim();
   } catch { ow = "db-err"; }
@@ -1162,7 +1173,7 @@ S[19] = async () => {
   let ow = "?";
   try {
     ow = require("child_process").execSync(
-      `python -c "import sqlite3,json;con=sqlite3.connect(r'${(process.env.APPDATA + "\\\\ytdlp-gui\\\\history.db").replace(/\\/g, "/")}');r=con.execute('select options from jobs where id=?',('${j2.id}',)).fetchone();print(str(json.loads(r[0]).get('overwrite')).lower())"`,
+      `python -c "import sqlite3,json;con=sqlite3.connect(r'${DATA_DIR_SQL}/history.db');r=con.execute('select options from jobs where id=?',('${j2.id}',)).fetchone();print(str(json.loads(r[0]).get('overwrite')).lower())"`,
       { encoding: "utf8" },
     ).trim();
   } catch { ow = "db-err"; }
@@ -1177,14 +1188,27 @@ S[19] = async () => {
  * the same identity breaks s7's relink targeting (both found live, solo
  * chains reusing a dirty db). */
 function wipeState() {
-  const dir = process.env.APPDATA + "\\\\ytdlp-gui";
-  if (fs.existsSync(dir)) {
-    for (const f of fs.readdirSync(dir)) {
+  if (fs.existsSync(DATA_DIR)) {
+    for (const f of fs.readdirSync(DATA_DIR)) {
       if (f === "bin") continue;
-      fs.rmSync(path.join(dir, f), { recursive: true, force: true });
+      fs.rmSync(path.join(DATA_DIR, f), { recursive: true, force: true });
     }
   }
   fs.rmSync(DL_DIR, { recursive: true, force: true });
+
+  // the sandbox has no bin/ — provision the staged managed binaries from the
+  // legacy profile (exactly what the installer wizard would have placed).
+  // settings.json is seeded AFTER this so a stale sandbox manifest.json is
+  // left alone (the manager is its single writer).
+  const binDst = path.join(DATA_DIR, "bin");
+  if (!fs.existsSync(path.join(binDst, "yt-dlp.exe"))) {
+    const binSrc = path.join(LEGACY_PROFILE, "bin");
+    fs.mkdirSync(binDst, { recursive: true });
+    for (const f of ["yt-dlp.exe", "ffmpeg.exe", "ffprobe.exe", "manifest.json"]) {
+      const src = path.join(binSrc, f);
+      if (fs.existsSync(src)) fs.copyFileSync(src, path.join(binDst, f));
+    }
+  }
 }
 
 /** seed settings.json before launch — a run must not depend on leftover
@@ -1193,10 +1217,9 @@ function wipeState() {
  * landed in ~/Music instead of the e2e dir, resurrecting the existing-target
  * error edge the scenario had already fixed). */
 function seedSettings() {
-  const dir = process.env.APPDATA + "\\\\ytdlp-gui";
-  fs.mkdirSync(dir, { recursive: true });
+  fs.mkdirSync(DATA_DIR, { recursive: true });
   fs.writeFileSync(
-    path.join(dir, "settings.json"),
+    path.join(DATA_DIR, "settings.json"),
     JSON.stringify({ destination: DL_DIR, concurrency: 2, wizardDismissed: true, migratedFromV1: true }, null, 2),
   );
 }
@@ -1222,7 +1245,7 @@ async function main() {
     ? process.argv[process.argv.indexOf("--only") + 1].split(",").map(Number)
     : null;
   if (process.argv.includes("--fresh") || !only) wipeState();
-  let order = [1, 4, 3, 2, 9, 10, 12, 11, 13, 14, 8, 7, 5, 6, 15, 16, 18, 19, 20, 21];
+  let order = [1, 4, 3, 2, 9, 10, 12, 11, 13, 14, 8, 7, 5, 6, 15, 16, 18, 19, 20, 21, 22];
   if (process.argv.includes("--smoke")) order = order.filter((n) => SOURCE[n] !== "youtube");
   const toRun = only ? order.filter((n) => only.includes(n)) : order;
   if (toRun.length === 0) {
@@ -1251,7 +1274,7 @@ async function main() {
     }
   } catch { /* outside a git checkout or exe missing — launch will report */ }
 
-  console.log(`launching real app: ${EXE} (cdp :${PORT})`);
+  console.log(`launching real app: ${EXE} (cdp :${PORT}, data: ${DATA_DIR})`);
   seedSettings();
   const { ws: socket } = await launchAndAttach(EXE, PORT);
   ws = socket;
@@ -1291,7 +1314,7 @@ async function main() {
 S[20] = async () => {
   const details = [];
   await setOpts({ dlType: "audio", skipDownloaded: true });
-  const arch = process.env.APPDATA + "\\ytdlp-gui\\downloaded.txt";
+  const arch = path.join(DATA_DIR, "downloaded.txt");
   const archLine = () => fs.existsSync(arch) ? fs.readFileSync(arch, "utf8").split(/\r?\n/).map((l) => l.trim()).find((l) => l.startsWith("soundcloud ")) : null;
   const priorIds = new Set((await jobBy("flickermood")).map((j) => j.id));
   const t0 = Date.now();
@@ -1334,7 +1357,7 @@ S[20] = async () => {
 // unknown" and the next --fresh wipe clears it.
 S[21] = async () => {
   const details = [];
-  const arch = process.env.APPDATA + "\\ytdlp-gui\\downloaded.txt";
+  const arch = path.join(DATA_DIR, "downloaded.txt");
   const call = () => evalAsync(ws, `window.__e2e.ipc('archive_reconcile')`);
   // per-run fake id: a leftover imported row from an earlier run would make
   // INSERT OR IGNORE skip the backfill (found live) — uniqueness makes the
@@ -1352,6 +1375,55 @@ S[21] = async () => {
   const rep2 = await call();
   details.push(`after cleanup: rowsBackfilled=${rep2.rowsBackfilled} (per-call count; 0 = idempotent)`);
   record(21, "archive→history backfill + idempotence (d64)", rep.rowsBackfilled - before.rowsBackfilled === 1 && !!imported && imported.url == null && rep2.rowsBackfilled === 0, details);
+};
+
+// d69: reset app data — guarded, double-confirmed in the ui, and (this being
+// the engine-truth contract) truthful about what it removed. runs last: it
+// wipes the sandbox profile, which is also what makes it self-verifying.
+S[22] = async () => {
+  const details = [];
+  const queueBefore = await evalAsync(ws, `window.__e2e.ipc('queue_list')`);
+  const busy = queueBefore.filter((j) => ["fetching", "downloading", "post"].includes(j.state));
+  details.push(`queue rows before: ${queueBefore.length} (busy: ${busy.length})`);
+
+  // the refusal probe is only safe while actually busy — an idle-queue call
+  // is not refused, it PERFORMS the reset (found live: the probe wiped the
+  // rows and the real call below saw a no-op).
+  if (busy.length > 0) {
+    const refused = await evalAsync(ws, `window.__e2e.ipc('app_reset_data').then(() => 'allowed', (e) => String(e))`);
+    details.push(`busy-guard: refused while busy: ${String(refused).slice(0, 90)}`);
+    if (!String(refused).includes("busy")) {
+      record(22, "reset app data (d69)", false, [...details, "reset was ALLOWED while the queue was busy — guard broken"]);
+      return;
+    }
+  } else {
+    details.push("busy-guard: n/a (queue idle)");
+  }
+
+  // drain to idle so the reset can proceed (stop any stragglers, wait for
+  // the engine to settle — the same quiescence discipline as s5/s15)
+  if (busy.length > 0) {
+    for (const j of busy) await evalAsync(ws, `window.__e2e.ipc('job_stop', { id: ${JSON.stringify(j.id)} }).catch(() => {})`);
+    await evalUntil(
+      `window.__e2e.ipc('queue_list').then(v => v.every(j => !["fetching","downloading","post"].includes(j.state)))`,
+      { timeoutMs: 120000, everyMs: 500, label: "queue idle (s22)" },
+    );
+  }
+
+  const rep = await evalAsync(ws, `window.__e2e.ipc('app_reset_data')`);
+  const jobsAfter = await evalAsync(ws, `window.__e2e.ipc('queue_list')`);
+  const histAfter = await evalAsync(ws, `window.__e2e.ipc('history_list')`);
+  const settingsAfter = fs.existsSync(path.join(DATA_DIR, "settings.json")) ? null : "removed";
+  const archiveAfter = fs.existsSync(path.join(DATA_DIR, "downloaded.txt")) ? null : "removed";
+  const binKept = fs.existsSync(path.join(DATA_DIR, "bin", "yt-dlp.exe"));
+  details.push(`report: jobs=${rep.jobsCleared} history=${rep.historyCleared} settings=${rep.settingsRemoved} archive=${rep.archiveRemoved} customArchive=${rep.archiveWasCustom}`);
+  details.push(`after: queue=${jobsAfter.length} history=${histAfter.length} settings.json=${settingsAfter} downloaded.txt=${archiveAfter} bin kept=${binKept}`);
+
+  const noop = rep.jobsCleared === 0; // both wipes ran earlier in this run
+  record(22, "reset app data (d69): guarded wipe, bin kept, report matches disk",
+    jobsAfter.length === 0 && histAfter.length === 0 && settingsAfter === "removed" && binKept &&
+      (noop || rep.jobsCleared === queueBefore.length),
+    details);
 };
 
 const SCEN_NAMES = {
@@ -1375,6 +1447,7 @@ const SCEN_NAMES = {
   19: "queue-time overwrite gate (D59)",
   20: "archived duplicate skips (no youtube)",
   21: "archive↔db reconciliation (D64)",
+  22: "reset app data (D69)",
 };
 
 function writeResultsDoc() {
@@ -1385,7 +1458,7 @@ function writeResultsDoc() {
     `- run date: ${date}`,
     "- driver: real app (debug build + vite dev server), driven over WebView2 remote debugging",
     "  (real ipc, real yt-dlp processes, real network; state asserted via `invoke()` engine truth)",
-    "- managed binaries: staged yt-dlp 2026.08.19 + btbN ffmpeg (%APPDATA%\\ytdlp-gui\\bin)",
+    "- managed binaries: staged yt-dlp + btbN ffmpeg (copied into the e2e sandbox bin/)",
     `- results: ${results.filter((r) => r.pass).length}/${results.length} pass`,
     "",
     "| # | scenario | result | evidence |",

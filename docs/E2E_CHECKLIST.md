@@ -50,6 +50,7 @@ machine; a full run still requires youtube scenarios to be runnable.
 | 19 | queue-time overwrite gate (D59/D60) | paste a url whose file already exists in the destination, press queue: cancel the dialog, then repeat and accept | cancel: nothing queues, "queueing cancelled" feedback shows; accept: job queued with `--force-overwrites`, runs clean, mtime advances. a slow/unreachable url must never stall the queue click (2.5s probe cap, D60) |
 | 20 | archived duplicate skips (D61/D63, no youtube) | queue a soundcloud url with skip-downloaded on, let it finish, queue it again | second queue ends done/skipped instantly ("already in downloaded archive"), the file's mtime is untouched, and no overwrite dialog fires (the D60 archive-aware branch must never ask when the engine would skip cleanly) |
 | 21 | archive↔db reconciliation (D64) | history → "reconcile archive" after appending a fake `e2efake <id>` line to downloaded.txt | report shows +1 row backfilled ("source url unknown"); a second reconcile backfills nothing (idempotent); no archive line or history row is ever pruned |
+| 22 | reset app data (D69) | settings → app → "reset app data…", confirm twice with downloads running and again when idle | refused with a busy message while anything runs; when idle: queue and history report 0 rows, settings.json and downloaded.txt are gone from the profile, bin/ survives, and the report matches what the disk shows |
 
 ## notes
 

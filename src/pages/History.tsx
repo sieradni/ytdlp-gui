@@ -1,7 +1,17 @@
 import { useCallback, useEffect, useState } from "react";
 import { open as openDialog, ask } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
-import { fileExists, historyImportArchive, historyList, historyRelink, jobAdd, type HistoryRow } from "../lib/ipc";
+import {
+  e2eArtifactsRemove,
+  e2eArtifactsReport,
+  fileExists,
+  historyImportArchive,
+  historyList,
+  historyRelink,
+  jobAdd,
+  type ArtifactReport,
+  type HistoryRow,
+} from "../lib/ipc";
 import { currentOptions } from "../components/Composer";
 
 function fmtSize(bytes: number | null): string {
@@ -37,6 +47,18 @@ export default function HistoryPage() {
 
   const load = useCallback(async (filter?: string) => {
     setRows(await historyList(filter));
+  }, []);
+
+  // d69 one-time cleanup: alpha.2 profiles may hold e2e rows (the campaign
+  // shared the installed app's data dir). probe once per mount; the banner
+  // only exists when contamination is found, and removal is an explicit click.
+  const [artifacts, setArtifacts] = useState<ArtifactReport | null>(null);
+  useEffect(() => {
+    void e2eArtifactsReport()
+      .then((rep) => {
+        if (rep.jobs.length + rep.history.length > 0) setArtifacts(rep);
+      })
+      .catch(() => {}); // probe failures never block the page
   }, []);
 
   useEffect(() => {
@@ -125,6 +147,35 @@ export default function HistoryPage() {
 
   return (
     <div className="mx-auto max-w-[860px] px-5 pt-4 pb-9">
+      {artifacts && (
+        <div className="card" style={{ borderColor: "var(--amber, #b8860b)" }}>
+          <div className="card-h">
+            <h2>test data found</h2>
+          </div>
+          <div className="card-b">
+            <div className="hint">
+              this profile contains {artifacts.jobs.length} queued-download and
+              {" "}
+              {artifacts.history.length} history entries pointing into the e2e
+              test sandbox (left behind by pre-alpha.3 test runs that shared the
+              installed app's data folder). they are not real downloads.
+            </div>
+            <div className="row flex items-center gap-2" style={{ marginTop: 8 }}>
+              <button
+                className="btn sm danger"
+                onClick={async () => {
+                  await e2eArtifactsRemove();
+                  setArtifacts(null);
+                  await load();
+                }}
+              >
+                remove test data
+              </button>
+              <span className="hint">your real downloads are never touched</span>
+            </div>
+          </div>
+        </div>
+      )}
       <div className="card">
         <div className="card-h">
           <h2>history</h2>

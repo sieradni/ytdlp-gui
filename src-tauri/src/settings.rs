@@ -30,7 +30,7 @@ pub struct Settings {
     pub migrated_from_v1: bool,
 }
 
-fn settings_path() -> PathBuf {
+pub fn settings_path() -> PathBuf {
     super::binaries::manager::app_data_dir().join("settings.json")
 }
 
@@ -66,6 +66,16 @@ impl SettingsHandle {
         save(&s)?;
         if let Ok(mut g) = self.0.lock() {
             *g = s;
+        }
+        Ok(())
+    }
+
+    /// d69 reset: restore the in-memory view to defaults (after the file was
+    /// removed) so the running app never serves a stale snapshot. does not
+    /// write the file — the next save recreates it fresh.
+    pub fn reset_to_defaults(&self) -> AppResult<()> {
+        if let Ok(mut g) = self.0.lock() {
+            *g = Settings::default();
         }
         Ok(())
     }

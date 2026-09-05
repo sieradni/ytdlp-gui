@@ -115,6 +115,13 @@ impl Db {
         self.0.lock().expect("db mutex poisoned")
     }
 
+    /// exclusive handle for maintenance (d69 reset / artifact cleanup):
+    /// same mutex as every other accessor, exposed for multi-statement
+    /// destructive work (DELETE + VACUUM) that must run as one unit.
+    pub fn conn_for_maintenance(&self) -> std::sync::MutexGuard<'_, Connection> {
+        self.conn()
+    }
+
     // ----- jobs -----
 
     pub fn insert_job(&self, j: &JobRow) -> AppResult<()> {

@@ -18,10 +18,27 @@ use crate::error::{other, AppResult};
 // ---------------------------------------------------------------------------
 
 /// `%APPDATA%\ytdlp-gui` (roaming). writable, no admin required.
+///
+/// d69 dev/prod split: builds with `debug_assertions` (cargo dev, tests, the
+/// e2e suite) run against `ytdlp-gui-dev` so test data can never bleed into
+/// an installed app's profile — the alpha.2 campaign contamination (e2e rows
+/// visible in the installed app) was exactly this leak. `YTDLP_GUI_DATA_DIR`
+/// overrides both for tooling that needs a specific sandbox. release builds
+/// keep the real profile path.
 pub fn app_data_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("YTDLP_GUI_DATA_DIR") {
+        if !dir.trim().is_empty() {
+            return PathBuf::from(dir);
+        }
+    }
+    let name = if cfg!(debug_assertions) {
+        "ytdlp-gui-dev"
+    } else {
+        "ytdlp-gui"
+    };
     dirs::data_dir()
-        .unwrap_or_else(|| std::env::temp_dir().join("ytdlp-gui"))
-        .join("ytdlp-gui")
+        .unwrap_or_else(|| std::env::temp_dir().join(name))
+        .join(name)
 }
 
 pub fn bin_dir() -> PathBuf {

@@ -1,3 +1,4 @@
+pub mod app;
 pub mod binaries;
 pub mod history;
 pub mod jobs;

@@ -253,6 +253,37 @@ export interface AppPaths {
 export const appPaths = () => invoke<AppPaths>("app_paths");
 
 // ---------------------------------------------------------------------------
+// app lifecycle (m7-b, D69): reset + one-time e2e-artifact cleanup
+// ---------------------------------------------------------------------------
+
+export interface ResetReport {
+  settingsRemoved: boolean;
+  jobsCleared: number;
+  historyCleared: number;
+  archiveRemoved: boolean;
+  archiveWasCustom: boolean;
+}
+export const appResetData = () => invoke<ResetReport>("app_reset_data");
+
+export interface ArtifactHit {
+  /** jobs: the job id; history: the extractor */
+  extractor: string;
+  /** jobs: the title; history: the video id */
+  vid: string;
+  finalPath: string | null;
+}
+export interface ArtifactReport {
+  jobs: ArtifactHit[];
+  history: ArtifactHit[];
+}
+export interface ArtifactRemoveReport {
+  jobsRemoved: number;
+  historyRemoved: number;
+}
+export const e2eArtifactsReport = () => invoke<ArtifactReport>("e2e_artifacts_report");
+export const e2eArtifactsRemove = () => invoke<ArtifactRemoveReport>("e2e_artifacts_remove");
+
+// ---------------------------------------------------------------------------
 // v1 migration (§11, D43) — what this launch's one-shot migration found
 // ---------------------------------------------------------------------------
 
