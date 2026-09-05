@@ -109,7 +109,17 @@ export default function HistoryPage() {
       }
       overwrite = true;
     }
-    await jobAdd([row.url], { ...currentOptions, overwrite });
+    // d63: ↻ means **force re-download** — it bypasses the engine's archive
+    // pre-check for this job only (the engine's own archive-append stays
+    // idempotent, so the archive never drifts). without this, a granted
+    // overwrite dialog was followed by the engine's "already in downloaded
+    // archive" skip — the dialog promised what the engine then refused.
+    // the composer default (respect the archive) is unchanged.
+    await jobAdd([row.url], {
+      ...currentOptions,
+      overwrite,
+      skipDownloaded: false,
+    });
     await load(query || undefined);
   };
 
@@ -233,6 +243,22 @@ export default function HistoryPage() {
           <button
             className="btn sm ghost"
             onClick={async () => {
+              const { archiveReconcile } = await import("../lib/ipc");
+              const r = await archiveReconcile();
+              setImportMsg(
+                r.rowsBackfilled > 0
+                  ? `reconciled: ${r.rowsBackfilled} archive ids added to history (${r.idsInArchive} in archive)`
+                  : `archive reconciled — ${r.idsInArchive} ids, nothing to backfill`,
+              );
+              await load(query || undefined);
+            }}
+            title="add history rows for archive ids the db doesn't know (d64) — never removes anything"
+          >
+            reconcile archive
+          </button>
+          <button
+            className="btn sm ghost"
+            onClick={async () => {
               const picked = await openDialog({
                 multiple: false,
                 filters: [{ name: "downloaded.txt", extensions: ["txt"] }],
@@ -244,7 +270,7 @@ export default function HistoryPage() {
               }
             }}
           >
-            import v1…
+            import archive…
           </button>
           <span className="hint" style={{ width: "100%" }}>
             ⚠ editing downloaded.txt changes what counts as already downloaded

@@ -148,11 +148,30 @@ pub async fn detect_version(exe: &Path, tool: Tool) -> Option<String> {
 
     Some(match tool {
         Tool::YtDlp => line.to_owned(),
-        Tool::Ffmpeg => {
-            // "ffmpeg version 7.1.1-…" → the token after "version"
-            line.split_whitespace().nth(2).unwrap_or(line).to_owned()
-        }
+        Tool::Ffmpeg => parse_ffmpeg_version(line).unwrap_or_else(|| line.to_owned()),
     })
+}
+
+/// d65: ffmpeg's raw version string is unreadable (`N-126404-g1818e5d965b`
+/// for btbN nightly, `7.1.1-essentials_build` for gyan releases, `7.1.1`
+/// upstream). display policy: nightly builds show the build **date** (the
+/// hash is noise for humans), tagged releases show the tag. parses the
+/// `-version` banner: `ffmpeg version <v> ...` (3rd token).
+pub fn parse_ffmpeg_version(banner_line: &str) -> Option<String> {
+    let v = banner_line.split_whitespace().nth(2)?;
+    // btbN nightly: `N-126404-g1818e5d965b-20260904` (date suffix) or
+    // `N-126404-g1818e5d965b` (no date). carry the date when present.
+    if v.starts_with("N-") {
+        let date = v
+            .rsplit('-')
+            .next()
+            .filter(|d| d.len() == 8 && d.bytes().all(|b| b.is_ascii_digit()));
+        return Some(match date {
+            Some(d) => format!("nightly {}-{}-{}", &d[0..4], &d[4..6], &d[6..8]),
+            None => "nightly".to_owned(),
+        });
+    }
+    Some(v.to_owned())
 }
 
 // windows-only: tokio::process::Command exposes `creation_flags` inherently
@@ -497,34 +516,58 @@ impl BinaryManifest {
 /// (D42: lastChecked + etag + latestTag). returns `Some(new_tag)` when the
 /// release differs from the installed state (→ "update available").
 ///
-/// rolling sources (btbN's `latest`): the tag is constant, so change is
-/// signaled by the release etag instead — a new upload gets a fresh etag.
+/// d65: change is judged **per source** — the manifest remembers which source
+/// served the installed artifact, and an etag is only ever compared to a
+/// release from that same source. comparing an etag across sources (btbN vs
+/// gyan) is always "different" and produced a perpetual false badge after
+/// any fallback-served update (alpha.2 install, 2026-09). a source switch
+/// (btbN failing → gyan serving) therefore marks the update available — the
+/// artifact genuinely differs — and a re-install re-records the source.
 pub fn record_check(tool: Tool, rel: &LatestRelease) -> AppResult<Option<String>> {
     let mut m = load_manifest()?;
     let entry = m.entry_mut(tool).get_or_insert_with(ToolEntry::default);
+    let update_available = update_available_for(
+        entry.source.as_str(),
+        entry.etag.as_deref(),
+        entry.latest_tag.as_deref(),
+        rel,
+        tool,
+    );
+    entry.latest_tag = Some(rel.tag.clone());
+    entry.last_checked = Some(now_unix());
+    // the etag is stored WITH its source so the next check replays it only
+    // against that source (the replay side already filters by source id).
+    entry.etag = rel.etag.clone();
+    save_manifest(&m)?;
+    Ok(update_available.then(|| rel.tag.clone()))
+}
+
+/// d65: the update decision, source-scoped. `installed_source` is the source
+/// that served the artifact on disk; the fresh release is only comparable to
+/// it when it comes from the same source — rolling sources compare etags,
+/// tagged sources compare tags, and a cross-source answer is always an
+/// update (the artifact would genuinely change).
+fn update_available_for(
+    installed_source: &str,
+    installed_etag: Option<&str>,
+    installed_latest_tag: Option<&str>,
+    rel: &LatestRelease,
+    tool: Tool,
+) -> bool {
+    if installed_source != rel.source_id {
+        return true;
+    }
     let rolling = sources_for(tool)
         .iter()
         .find(|s| s.id == rel.source_id)
         .is_some_and(Source::rolling);
-    let update_available = if rolling {
-        // rolling sources: the tag never changes ("latest"), so the release
-        // etag is the change signal. if the source omits etags entirely,
-        // change can't be detected — the badge stays off and `update`
-        // remains available on demand (D20 keeps it user-initiated anyway).
-        entry.latest_tag.as_deref() != Some(rel.tag.as_str())
-            || entry.etag.as_deref() != rel.etag.as_deref()
+    if rolling {
+        installed_etag != rel.etag.as_deref()
     } else {
-        entry
-            .latest_tag
-            .as_ref()
-            .map(|seen| seen != &rel.tag)
+        installed_latest_tag
+            .map(|seen| seen != rel.tag)
             .unwrap_or(true)
-    };
-    entry.latest_tag = Some(rel.tag.clone());
-    entry.etag = rel.etag.clone();
-    entry.last_checked = Some(now_unix());
-    save_manifest(&m)?;
-    Ok(update_available.then(|| rel.tag.clone()))
+    }
 }
 
 /// 304 from a conditional check: nothing newer since last time. still bump
@@ -624,10 +667,101 @@ mod tests {
 
     #[test]
     fn ffmpeg_version_parses_from_dash_version_output() {
-        // detect_version spawns a real binary; parse logic is mirrored here
-        // so the parsing contract is pinned without network/process deps.
-        let line = "ffmpeg version 7.1.1-essentials_build www.ffmpeg.org";
-        let v = line.split_whitespace().nth(2).unwrap();
-        assert_eq!(v, "7.1.1-essentials_build");
+        // tagged releases keep their tag; nightly builds display a date
+        assert_eq!(
+            parse_ffmpeg_version("ffmpeg version 7.1.1-essentials_build www.ffmpeg.org"),
+            Some("7.1.1-essentials_build".into())
+        );
+        assert_eq!(
+            parse_ffmpeg_version("ffmpeg version N-126404-g1818e5d965b-20260904 Copyright"),
+            Some("nightly 2026-09-04".into())
+        );
+        assert_eq!(
+            parse_ffmpeg_version("ffmpeg version N-126404-g1818e5d965b Copyright"),
+            Some("nightly".into())
+        );
+        assert_eq!(parse_ffmpeg_version("ffmpeg"), None);
+    }
+
+    #[test]
+    fn record_check_is_source_scoped_d65() {
+        let rel_b_same = LatestRelease {
+            tag: "latest".into(),
+            source_id: "btbn".into(),
+            asset_url: Some("https://x/ffmpeg.zip".into()),
+            sums_url: None,
+            etag: Some("\"bbb\"".into()),
+        };
+        let rel_b_new = LatestRelease {
+            etag: Some("\"ccc\"".into()),
+            ..rel_b_same.clone()
+        };
+        let rel_g = LatestRelease {
+            tag: "9.0.1".into(),
+            source_id: "gyan".into(),
+            asset_url: Some("https://x/ffmpeg-9.0.1.zip".into()),
+            sums_url: None,
+            etag: Some("\"ggg\"".into()),
+        };
+        // btbn-served install, the same btbn release still up: NO badge
+        // (alpha.2 showed a perpetual one — the tag is "latest" forever).
+        assert!(!update_available_for(
+            "btbn",
+            Some("\"bbb\""),
+            Some("latest"),
+            &rel_b_same,
+            Tool::Ffmpeg
+        ));
+        // same source, new upload (fresh etag): badge.
+        assert!(update_available_for(
+            "btbn",
+            Some("\"bbb\""),
+            Some("latest"),
+            &rel_b_new,
+            Tool::Ffmpeg
+        ));
+        // gyan serving for a btbn install: badge (the artifact would change).
+        assert!(update_available_for(
+            "btbn",
+            Some("\"bbb\""),
+            Some("latest"),
+            &rel_g,
+            Tool::Ffmpeg
+        ));
+        // tagged source: same tag → no, new tag → yes.
+        assert!(!update_available_for(
+            "gyan",
+            Some("\"g1\""),
+            Some("9.0.1"),
+            &rel_g,
+            Tool::Ffmpeg
+        ));
+        let rel_g_new = LatestRelease {
+            tag: "9.0.2".into(),
+            etag: Some("\"g2\"".into()),
+            ..rel_g.clone()
+        };
+        assert!(update_available_for(
+            "gyan",
+            Some("\"g1\""),
+            Some("9.0.1"),
+            &rel_g_new,
+            Tool::Ffmpeg
+        ));
+        // yt-dlp (github, tagged): unchanged tag → no badge.
+        let rel_yt = LatestRelease {
+            tag: "2026.09.01".into(),
+            source_id: "github".into(),
+            asset_url: Some("https://x/yt-dlp.exe".into()),
+            sums_url: None,
+            etag: Some("\"y1\"".into()),
+        };
+        assert!(!update_available_for(
+            "github",
+            Some("\"y1\""),
+            Some("2026.09.01"),
+            &rel_yt,
+            Tool::YtDlp
+        ));
     }
 }

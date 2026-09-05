@@ -174,23 +174,47 @@ export const useQueue = create<QueueState>((set, get) => ({
           return;
         }
         set((s) => ({
-          jobs: s.jobs.map((j) =>
-            j.id === p.id
-              ? {
-                  ...j,
-                  state: p.state ?? j.state,
-                  pct: p.pct ?? j.pct,
-                  speedBps: "speedBps" in p ? (p.speedBps ?? null) : j.speedBps,
-                  etaSec: "etaSec" in p ? (p.etaSec ?? null) : j.etaSec,
-                  title: p.title ?? j.title,
-                  finalPath: p.finalPath ?? j.finalPath,
-                  error: "error" in p ? (p.error ?? null) : j.error,
-                  skipped: p.skipped ?? j.skipped,
-                  itemsDone: "itemsDone" in p ? (p.itemsDone ?? null) : j.itemsDone,
-                  itemsTotal: "itemsTotal" in p ? (p.itemsTotal ?? null) : j.itemsTotal,
-                }
-              : j,
-          ),
+          jobs: s.jobs.map((j) => {
+            if (j.id !== p.id) return j;
+            // d61: state transitions are **monotonic** — a late/stale event
+            // (udp packets of the same 200ms stream can arrive reordered
+            // through the ipc bridge) must never downgrade the visible state:
+            // the "green 100% while fetching" ghost from the alpha.2 install
+            // was a stale fetching patch landing after progress/terminal
+            // updates. progress fields are cleared when a state regress was
+            // suppressed so stale pct can't linger under a newer state.
+            const STATE_RANK: Record<JobState, number> = {
+              queued: 0,
+              fetching: 1,
+              downloading: 2,
+              post: 3,
+              done: 4,
+              stopped: 4,
+              error: 4,
+              duplicate: 4,
+            };
+            const incoming = (p.state ?? j.state) as JobState;
+            const staleDowngrade =
+              p.state != null && STATE_RANK[p.state] < STATE_RANK[j.state];
+            const state = staleDowngrade ? j.state : incoming;
+            const clearProgress = staleDowngrade;
+            return {
+              ...j,
+              state,
+              pct: clearProgress ? null : (p.pct ?? j.pct),
+              speedBps: clearProgress ? null : "speedBps" in p ? (p.speedBps ?? null) : j.speedBps,
+              etaSec: clearProgress ? null : "etaSec" in p ? (p.etaSec ?? null) : j.etaSec,
+              // the fetch ticker drives this; it must never overwrite a
+              // previously known pct with something stale
+              fetchMs: "fetchMs" in p ? (p.fetchMs ?? null) : j.fetchMs,
+              title: p.title ?? j.title,
+              finalPath: p.finalPath ?? j.finalPath,
+              error: "error" in p ? (p.error ?? null) : j.error,
+              skipped: p.skipped ?? j.skipped,
+              itemsDone: "itemsDone" in p ? (p.itemsDone ?? null) : j.itemsDone,
+              itemsTotal: "itemsTotal" in p ? (p.itemsTotal ?? null) : j.itemsTotal,
+            };
+          }),
         }));
       },
     );

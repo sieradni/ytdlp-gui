@@ -48,6 +48,8 @@ machine; a full run still requires youtube scenarios to be runnable.
 | 17 | app update path (post-key) | after the minisign key ships, tag v0.0.1 and launch the installed previous build | banner appears with the new version; update & restart installs and relaunches; settings version shows the new runtime version |
 | 18 | re-download overwrite gate (D59) | with a downloaded file present, set composer options, history ↻ on its row: cancel the "file already exists" dialog, then repeat and accept | cancel: nothing queues, "re-download cancelled" hint shows; accept: new job with `--force-overwrites` runs clean and the file's mtime advances |
 | 19 | queue-time overwrite gate (D59/D60) | paste a url whose file already exists in the destination, press queue: cancel the dialog, then repeat and accept | cancel: nothing queues, "queueing cancelled" feedback shows; accept: job queued with `--force-overwrites`, runs clean, mtime advances. a slow/unreachable url must never stall the queue click (2.5s probe cap, D60) |
+| 20 | archived duplicate skips (D61/D63, no youtube) | queue a soundcloud url with skip-downloaded on, let it finish, queue it again | second queue ends done/skipped instantly ("already in downloaded archive"), the file's mtime is untouched, and no overwrite dialog fires (the D60 archive-aware branch must never ask when the engine would skip cleanly) |
+| 21 | archive↔db reconciliation (D64) | history → "reconcile archive" after appending a fake `e2efake <id>` line to downloaded.txt | report shows +1 row backfilled ("source url unknown"); a second reconcile backfills nothing (idempotent); no archive line or history row is ever pruned |
 
 ## notes
 

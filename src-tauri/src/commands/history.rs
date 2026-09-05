@@ -16,6 +16,57 @@ pub struct ArchiveImportResult {
     pub archive_path: String,
 }
 
+/// d64: the archive↔history asymmetry report. `ids_in_archive` counts the
+/// parseable entries; `rows_backfilled` counts history rows that were
+/// created (archive id with no db row — previously invisible); `rows_without_url`
+/// counts rows that can never be re-downloaded from the ui (imported ids).
+/// `archive_missing` entries listed in the archive whose db row claims a
+/// file that no longer exists are surfaced in the ui, never pruned.
+#[derive(Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ReconcileReport {
+    pub ids_in_archive: u64,
+    pub rows_backfilled: u64,
+    pub rows_without_url: u64,
+}
+
+/// d64: reconcile the download archive against the history db — run on the
+/// settings-configured archive (or the default location). backfills missing
+/// history rows from archive ids (engine skips them silently today: an
+/// archived-but-unrecorded download shows as "already downloaded" with no
+/// trace); the reverse asymmetry self-heals (a db row without an archive
+/// entry re-downloads and the engine re-appends). idempotent.
+#[tauri::command]
+pub fn archive_reconcile(
+    db: tauri::State<'_, Arc<Db>>,
+    settings: tauri::State<'_, crate::settings::SettingsHandle>,
+) -> AppResult<ReconcileReport> {
+    let path = crate::store::archive_path_from_settings_with(&settings.get());
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        // no archive yet is a healthy empty state, not an error
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(ReconcileReport::default()),
+        Err(e) => return Err(e.into()),
+    };
+    let ids_in_archive = text
+        .lines()
+        .filter(|l| {
+            let l = l.trim();
+            !l.is_empty()
+                && !l.starts_with('#')
+                && l.split_once(' ')
+                    .is_some_and(|(a, b)| !a.trim().is_empty() && !b.trim().is_empty())
+        })
+        .count() as u64;
+    let rows_backfilled = db.backfill_history_from_archive(&text)? as u64;
+    let rows_without_url = db.history_rows_without_url()?;
+    Ok(ReconcileReport {
+        ids_in_archive,
+        rows_backfilled,
+        rows_without_url,
+    })
+}
+
 #[tauri::command]
 pub fn history_list(
     db: tauri::State<'_, Arc<Db>>,

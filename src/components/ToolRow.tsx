@@ -79,8 +79,14 @@ export default function ToolRow({ status }: { status: ToolStatus }) {
           <span className="hint">not installed</span>
         )}
         {status.custom && <span className="hint">· custom path</span>}
-        {status.staged && <span className="warn">· staged — swaps in on next launch</span>}
-        {badge && !status.custom && (
+        {status.staged && (
+          // d65: staged is a first-class step, not a footnote — the badge
+          // said "update available" while the version row kept the old
+          // number because windows locks the running exe. say exactly what
+          // finishes it.
+          <span className="warn">· restart the app to finish the update</span>
+        )}
+        {badge && !status.custom && !status.staged && (
           <span className="warn">→ {badge} available</span>
         )}
         <button className="btn sm" onClick={check} disabled={busy !== ""}>

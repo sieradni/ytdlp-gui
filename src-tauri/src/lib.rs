@@ -95,6 +95,7 @@ pub fn run() {
             commands::history::history_import_archive,
             commands::history::history_relink,
             commands::history::file_exists,
+            commands::history::archive_reconcile,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

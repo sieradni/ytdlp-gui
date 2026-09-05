@@ -259,6 +259,55 @@ impl Db {
         }
         Ok(n)
     }
+
+    /// d64 archive→history reconciliation, phase 1 of `archive_reconcile`:
+    /// every archive id missing from history becomes an imported row (only
+    /// when it is genuinely absent — idempotent across re-runs). returns the
+    /// number of rows added.
+    pub fn backfill_history_from_archive(&self, text: &str) -> AppResult<usize> {
+        let now = now_unix();
+        let conn = self.conn();
+        let mut added = 0;
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let Some((extractor, vid)) = line.split_once(' ') else {
+                continue;
+            };
+            let (extractor, vid) = (extractor.trim(), vid.trim());
+            if extractor.is_empty() || vid.is_empty() {
+                continue;
+            }
+            let present: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM history WHERE extractor=?1 AND vid=?2",
+                rusqlite::params![extractor, vid],
+                |r| r.get(0),
+            )?;
+            if present > 0 {
+                continue;
+            }
+            conn.execute(
+                "INSERT INTO history (extractor, vid, downloaded_at) VALUES (?1,?2,?3)",
+                rusqlite::params![extractor, vid, now],
+            )?;
+            added += 1;
+        }
+        Ok(added)
+    }
+
+    /// d64 phase 2: which history rows have no url recorded (imported ids
+    /// only)? these render "source url unknown" in the ui — the report is
+    /// what makes the asymmetry visible instead of silent.
+    pub fn history_rows_without_url(&self) -> AppResult<u64> {
+        let n: i64 = self.conn().query_row(
+            "SELECT COUNT(*) FROM history WHERE url IS NULL OR url=''",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(n.max(0) as u64)
+    }
 }
 
 fn row_to_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<JobRow> {
@@ -344,11 +393,17 @@ fn ensure_columns(conn: &Connection) {
 
 /// does the archive file contain `<extractor> <vid>`? (D17: downloaded.txt is
 /// the skip source of truth; consult before queueing a resolved identity).
+/// extractor matching is case-insensitive: yt-dlp's writer emits `soundcloud`
+/// while probe surfaces print `Soundcloud` — a case-sensitive match silently
+/// missed real entries (found live, e2e s20). video ids stay exact.
 pub fn archive_contains(archive_path: &Path, extractor: &str, vid: &str) -> bool {
     match std::fs::read_to_string(archive_path) {
         Ok(text) => text.lines().any(|l| {
             let l = l.trim();
-            l == format!("{extractor} {vid}")
+            match l.split_once(' ') {
+                Some((ex, id)) => ex.eq_ignore_ascii_case(extractor) && id == vid,
+                None => false,
+            }
         }),
         Err(_) => false,
     }
@@ -380,6 +435,15 @@ pub fn default_archive_path() -> std::path::PathBuf {
 pub fn archive_path_from_settings() -> std::path::PathBuf {
     crate::settings::load()
         .archive_path
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(default_archive_path)
+}
+
+/// same, from an in-memory settings value (for callers already holding the
+/// handle's snapshot — avoids a second disk read mid-command).
+pub fn archive_path_from_settings_with(s: &crate::settings::Settings) -> std::path::PathBuf {
+    s.archive_path
+        .clone()
         .map(std::path::PathBuf::from)
         .unwrap_or_else(default_archive_path)
 }
@@ -521,6 +585,26 @@ mod tests {
     }
 
     #[test]
+    fn backfill_is_idempotent_and_reports_only_new_rows_d64() {
+        let db = Db::open_in_memory().unwrap();
+        let text = "youtube abc123\nyoutube def456\n# c\nbadline\n";
+        assert_eq!(db.backfill_history_from_archive(text).unwrap(), 2);
+        // re-run: nothing new
+        assert_eq!(db.backfill_history_from_archive(text).unwrap(), 0);
+        // an existing row (even url-less, from D43 seeding) is never duplicated
+        assert_eq!(
+            db.backfill_history_from_archive("youtube abc123\n")
+                .unwrap(),
+            0
+        );
+        let rows = db.list_history(None).unwrap();
+        assert_eq!(rows.len(), 2);
+        // imported rows carry no url — the ui's "paste the url" affordance
+        assert!(rows.iter().all(|r| r.url.is_none()));
+        assert_eq!(db.history_rows_without_url().unwrap(), 2);
+    }
+
+    #[test]
     fn archive_append_is_idempotent() {
         let dir = std::env::temp_dir().join(format!("yg-arch-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -533,6 +617,30 @@ mod tests {
         assert_eq!(text.lines().count(), 2);
         assert!(archive_contains(&p, "youtube", "abc"));
         assert!(!archive_contains(&p, "youtube", "zzz"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn archive_contains_is_case_insensitive_on_extractor() {
+        // real shapes: the engine writes `soundcloud` (via %(extractor)s)
+        // while probe surfaces print `Soundcloud` (via %(extractor_key)s) —
+        // a case-sensitive match silently missed the entry (found live,
+        // e2e s20, d59 gate false-positive).
+        let dir = std::env::temp_dir().join(format!("yg-arch-ci-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("downloaded.txt");
+        std::fs::write(&p, "soundcloud 293\nyoutube jNQXAC9IVRw\n").unwrap();
+        assert!(archive_contains(&p, "Soundcloud", "293"));
+        assert!(archive_contains(&p, "SOUNDCLOUD", "293"));
+        assert!(archive_contains(&p, "soundcloud", "293"));
+        assert!(archive_contains(&p, "YouTube", "jNQXAC9IVRw"));
+        // video id stays exact — no sloppy matching
+        assert!(!archive_contains(&p, "soundcloud", "29"));
+        assert!(!archive_contains(&p, "vimeo", "293"));
+        // malformed lines (no space) never match
+        std::fs::write(&p, "garbage\n").unwrap();
+        assert!(!archive_contains(&p, "garbage", ""));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

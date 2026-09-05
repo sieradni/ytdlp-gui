@@ -54,7 +54,7 @@ const SOURCE = {
   1: "youtube", 4: "youtube", 3: "youtube", 2: "youtube", 9: "other",
   10: "other", 12: "other", 11: "youtube", 13: "youtube", 14: "other",
   8: "youtube", 7: "youtube", 5: "youtube", 6: "youtube", 15: "youtube",
-  16: "youtube", 18: "other", 19: "other",
+  16: "youtube", 18: "other", 19: "other", 20: "other", 21: "none",
 };
 
 // ---------------------------------------------------------------------------
@@ -186,13 +186,19 @@ async function jobBy(urLSubstring) {
   return js.filter((j) => j.url.includes(urLSubstring));
 }
 
-/** wait until a job matching urlSub reaches state; returns the job */
-async function waitJob(urlSub, state, timeoutMs = 60000, everyMs = 400) {
+/** wait until a job matching urlSub reaches state; returns the job.
+ * notAfter (unix s) restricts the match to jobs created after that moment —
+ * queue_list includes FINISHED jobs forever, and stale done/fetching rows
+ * from earlier scenarios (or previous runs sharing the profile) poison a
+ * bare url+state match: s5 matched a stale row's `fetching` state and
+ * stalled 150s, cascading into s15/s16 (full-suite find, 2026-09-04). */
+async function waitJob(urlSub, state, timeoutMs = 60000, everyMs = 400, notAfter = null) {
+  const match = (j) => j.url.includes(urlSub) && j.state === state && (notAfter == null || j.createdAt > notAfter);
   return waitIpc(
     "queue_list",
-    (v) => v.some((j) => j.url.includes(urlSub) && j.state === state),
+    (v) => v.some(match),
     { timeoutMs, everyMs, label: `url~${urlSub} state=${state}` },
-  ).then(() => jobs().then((js) => js.find((j) => j.url.includes(urlSub) && j.state === state)));
+  ).then(() => jobs().then((js) => js.find(match)));
 }
 
 /** queue url(s) through the composer ui and press the button (not enter).
@@ -335,6 +341,12 @@ S[1] = async () => {
 // 4 — duplicate of archived item re-queues to done/skipped, no re-download
 S[4] = async () => {
   const details = [];
+  // composer state is SET here, never inherited: s3 leaves the skip toggle
+  // wherever the playlist run left it, and an inherited skip-off made s4
+  // re-download instead of skipping (found live). under the d59 gate a
+  // skip-off re-queue of an existing file opens the native overwrite dialog,
+  // which an unattended run never answers — the job then never queues.
+  await setOpts({ dlType: "video", maxResolution: "480p", skipDownloaded: true });
   const before = (await history()).length;
   // capture pre-existing jobs for this url — waitJob must match a NEW job,
   // not the stale done record from S1 (queue_list includes finished jobs)
@@ -344,7 +356,10 @@ S[4] = async () => {
   const done = await waitIpc(
     "queue_list",
     (v) => v.some((j) => j.url.includes("jNQXAC9IVRw") && !priorIds.has(j.id) && j.state === "done"),
-    { timeoutMs: 30000, everyMs: 300, label: "new zoo job done" },
+    // the d60 gate resolves identity at click time — a slow probe can take
+    // ~20s on a bad network day before the job even exists; the done wait
+    // must not start its clock after that (s4 timeout, full-suite find)
+    { timeoutMs: 60000, everyMs: 300, label: "new zoo job done" },
   ).then((v) => v.find((j) => j.url.includes("jNQXAC9IVRw") && !priorIds.has(j.id) && j.state === "done"));
   const elapsed = Date.now() - t0;
   details.push(`new job ${done.id}: state=done skipped=${done.skipped} in ${elapsed}ms`);
@@ -359,6 +374,10 @@ S[4] = async () => {
 // 3 — playlist first n=2 (runs BEFORE S2 so items 1-2 download fresh)
 S[3] = async () => {
   const details = [];
+  // playlist legs never archive-skip per-item in the pre-check (identity is
+  // the playlist), but the toggle still leaks to later scenarios — s4 reads
+  // it. set it here so s4's skip-on precondition is explicit, not inherited.
+  await setOpts({ skipDownloaded: false });
   await evalAsync(ws, `window.__e2e.clickText('.card .seg button', 'entire playlist', true)`);
   await evalAsync(ws, `window.__e2e.clickText('.card .seg button', 'first n…', true)`);
   const inp = await evalAsync(ws, `window.__e2e.firstNInput() ? 'ok' : null`);
@@ -745,11 +764,10 @@ S[7] = async () => {
 // 5 + 6 — identity duplicate while running (concurrency=2), then stop→resume
 S[5] = async () => {
   const details = [];
-  // composer is in audio/opus/skip-off state from S8 — set video/480p + skip ON
-  await evalAsync(ws, `window.__e2e.clickText('.card .seg button', 'video', true)`);
-  const resSel = await evalAsync(ws, `(() => { const s = [...document.querySelectorAll('.card select')].find(x => [...x.options].some(o => o.value === '2160p')); if (!s) return false; s.value = '480p'; s.dispatchEvent(new Event('change', { bubbles: true })); return true; })()`);
-  await evalAsync(ws, `(() => { const t = window.__e2e.skipToggle(); if (t && !t.checked) t.click(); return true; })()`);
-  details.push(`video mode, 480p cap set: ${resSel}, skip on`);
+  // composer state is set, not inherited (see s4): video/480p + skip ON,
+  // mirror-verified through applyOpts instead of trust-me dom pokes.
+  await setOpts({ dlType: "video", maxResolution: "480p", skipDownloaded: true });
+  details.push("video mode, 480p cap set, skip on");
   // job1 via composer (watch?v=)
   await queueViaComposer(DESPACITO_W);
   await waitJob("kJQP7kiw5Fk", "downloading", 45000, 400).catch(async () => {
@@ -759,8 +777,19 @@ S[5] = async () => {
   await queueViaComposer(DESPACITO_S);
   const dup = await waitJob("youtu.be/kJQP7kiw5Fk", "duplicate", 45000, 400);
   details.push(`job2 ended duplicate: ${JSON.stringify(dup.error)}`);
-  const j1 = (await jobBy("watch?v=kJQP7kiw5Fk")).find((j) => j.state === "downloading" || j.state === "post");
-  details.push(`job1 still ${j1?.state ?? "?"} (pct=${j1?.pct?.toFixed?.(1)}%)`);
+  let j1 = (await jobBy("watch?v=kJQP7kiw5Fk")).find((j) => j.state === "downloading" || j.state === "post");
+  if (!j1) {
+    // job1 finished between queueing job2 and this read — then the duplicate
+    // is archive-flavored (skip line), which still proves one-identity rules.
+    j1 = (await jobBy("watch?v=kJQP7kiw5Fk")).find((j) => j.state === "done" && j.skipped);
+  }
+  details.push(`job1 ${j1?.state ?? "?"} (pct=${j1?.pct?.toFixed?.(1)})`);
+  // determinism: stop job1 so later scenarios start quiescent regardless of
+  // how long despacito runs (an inherited running job stalled s15/s16 once).
+  if (j1 && ["downloading", "post", "fetching"].includes(j1.state)) {
+    await evalAsync(ws, `(() => { const r = [...document.querySelectorAll('tr.qrow')].find(x => x.textContent.includes('kJQP7kiw5Fk')); const b = r && [...r.querySelectorAll('button')].find(b => (b.title ?? '').startsWith('stop')); if (b) { b.click(); return 'stopped'; } return 'no-btn'; })()`);
+    await waitIpc("queue_list", (v) => v.some((j) => j.url.includes("watch?v=kJQP7kiw5Fk") && ["stopped", "done"].includes(j.state)), { timeoutMs: 20000, label: "job1 quiesced (s5)" }).catch(() => {});
+  }
   record(5, "identity duplicate while running", !!(dup.error && dup.error.includes("duplicate") && j1), details);
 };
 
@@ -1185,7 +1214,7 @@ async function main() {
     probe.on("error", () => resolve());
   });
   if (process.argv.includes("--list")) {
-    for (const n of [1, 4, 3, 2, 9, 10, 12, 11, 13, 14, 8, 7, 5, 6, 15, 16, 18, 19])
+    for (const n of [1, 4, 3, 2, 9, 10, 12, 11, 13, 14, 8, 7, 5, 6, 15, 16, 18, 19, 20, 21])
       console.log(`S${n}	${SOURCE[n]}	${SCEN_NAMES[n]}`);
     return;
   }
@@ -1193,7 +1222,7 @@ async function main() {
     ? process.argv[process.argv.indexOf("--only") + 1].split(",").map(Number)
     : null;
   if (process.argv.includes("--fresh") || !only) wipeState();
-  let order = [1, 4, 3, 2, 9, 10, 12, 11, 13, 14, 8, 7, 5, 6, 15, 16, 18, 19];
+  let order = [1, 4, 3, 2, 9, 10, 12, 11, 13, 14, 8, 7, 5, 6, 15, 16, 18, 19, 20, 21];
   if (process.argv.includes("--smoke")) order = order.filter((n) => SOURCE[n] !== "youtube");
   const toRun = only ? order.filter((n) => only.includes(n)) : order;
   if (toRun.length === 0) {
@@ -1252,6 +1281,79 @@ async function main() {
   process.exit(0);
 }
 
+// 20 — archived-duplicate skip semantic, no youtube (d61 close-out):
+// soundcloud flickermood queues → downloads → its id lands in the archive;
+// the re-queue must end done/skipped WITHOUT re-downloading (file mtime
+// untouched) and WITHOUT the d59 overwrite dialog — the gate's archive-aware
+// branch must never ask when the engine would skip cleanly. (if the gate
+// regresses, the unattended dialog blocks the wait until timeout: the failure
+// shape names the cause.) runs green on fresh state, solo, or after s10.
+S[20] = async () => {
+  const details = [];
+  await setOpts({ dlType: "audio", skipDownloaded: true });
+  const arch = process.env.APPDATA + "\\ytdlp-gui\\downloaded.txt";
+  const archLine = () => fs.existsSync(arch) ? fs.readFileSync(arch, "utf8").split(/\r?\n/).map((l) => l.trim()).find((l) => l.startsWith("soundcloud ")) : null;
+  const priorIds = new Set((await jobBy("flickermood")).map((j) => j.id));
+  const t0 = Date.now();
+  await queueViaComposer(SC_FLICKER);
+  // whichever way the archive sat before this scenario, the queue must end
+  // done quickly: freshly downloaded (archive line appended now) or already
+  // archived (engine pre-check). both prove "archived ⇒ no second download".
+  const isFlicker = (j) => j.url.includes("flickermood");
+  const done = await waitIpc("queue_list", (v) => v.some((j) => isFlicker(j) && !priorIds.has(j.id) && j.state === "done"), { timeoutMs: 120000, everyMs: 300, label: "flickermood done (s20)" })
+    .then((v) => v.find((j) => isFlicker(j) && !priorIds.has(j.id) && j.state === "done")); // filter the find too — unfiltered, it matched s18/s19's tycho rows (found live, full smoke)
+  const ms = Date.now() - t0;
+  details.push(`queue done in ${ms}ms skipped=${done.skipped} (${done.error ?? "no error"})`);
+  if (!done.skipped) {
+    const line = archLine();
+    if (!line) throw new Error("fresh download did not append an archive line");
+    details.push(`archive line appended: ${line}`);
+  }
+  if (done.finalPath && fs.existsSync(done.finalPath)) {
+    details.push(`file present: ${path.basename(done.finalPath)}`);
+  }
+  // pre-archived state: the skip happened in the engine's pre-check before
+  // any download, so there is no fresh file to stat — skip the mtime check
+  // (asserting it would re-download what --fresh deliberately keeps).
+  if (!fs.existsSync(done.finalPath)) {
+    record(20, "archived duplicate → done/skipped, no re-download, no dialog", done.skipped === true, details);
+    return;
+  }
+  const mtime0 = fs.statSync(done.finalPath).mtimeMs;
+  await queueViaComposer(SC_FLICKER);
+  const again = await waitIpc("queue_list", (v) => v.some((j) => isFlicker(j) && !priorIds.has(j.id) && j.id !== done.id && j.state === "done"), { timeoutMs: 120000, everyMs: 300, label: "re-queue done (s20)" }).then((v) => v.find((j) => isFlicker(j) && !priorIds.has(j.id) && j.id !== done.id && j.state === "done")); // filtered find + 120s: the gate's probe can legally take ~90s under throttle
+  const untouched = fs.statSync(done.finalPath).mtimeMs === mtime0;
+  details.push(`re-queue: skipped=${again.skipped}, file untouched=${untouched}`);
+  record(20, "archived duplicate → done/skipped, no re-download, no dialog", again.skipped === true && untouched, details);
+};
+
+// 21 — archive↔db reconciliation (d64), zero network: a fake id appended to
+// the archive is backfilled into history (+1, url-less row — visible, not
+// silent); removing it proves idempotence (second run backfills nothing).
+// the imported row is left in history deliberately: it renders "source url
+// unknown" and the next --fresh wipe clears it.
+S[21] = async () => {
+  const details = [];
+  const arch = process.env.APPDATA + "\\ytdlp-gui\\downloaded.txt";
+  const call = () => evalAsync(ws, `window.__e2e.ipc('archive_reconcile')`);
+  // per-run fake id: a leftover imported row from an earlier run would make
+  // INSERT OR IGNORE skip the backfill (found live) — uniqueness makes the
+  // scenario self-contained instead of state-dependent.
+  const FAKE = "e2eFAKE" + Date.now();
+  const before = await call();
+  fs.mkdirSync(path.dirname(arch), { recursive: true });
+  fs.appendFileSync(arch, `\ne2efake ${FAKE}\n`);
+  const rep = await call();
+  const rows = await history();
+  const imported = rows.find((h) => h.vid === FAKE);
+  details.push(`backfilled ${before.rowsBackfilled} → ${rep.rowsBackfilled} (+${rep.rowsBackfilled - before.rowsBackfilled}), rowsWithoutUrl=${rep.rowsWithoutUrl}, row.url=${imported?.url ?? "null"}`);
+  const lines = fs.readFileSync(arch, "utf8").split(/\r?\n/).filter((l) => l.trim() !== "" && !l.includes("e2eFAKE"));
+  fs.writeFileSync(arch, lines.join("\n") + "\n");
+  const rep2 = await call();
+  details.push(`after cleanup: rowsBackfilled=${rep2.rowsBackfilled} (per-call count; 0 = idempotent)`);
+  record(21, "archive→history backfill + idempotence (d64)", rep.rowsBackfilled - before.rowsBackfilled === 1 && !!imported && imported.url == null && rep2.rowsBackfilled === 0, details);
+};
+
 const SCEN_NAMES = {
   1: "single video end-to-end",
   2: "entire playlist counter",
@@ -1271,6 +1373,8 @@ const SCEN_NAMES = {
   16: "restart normalization (D35)",
   18: "re-download overwrite gate (D59)",
   19: "queue-time overwrite gate (D59)",
+  20: "archived duplicate skips (no youtube)",
+  21: "archive↔db reconciliation (D64)",
 };
 
 function writeResultsDoc() {

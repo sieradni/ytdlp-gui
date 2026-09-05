@@ -182,11 +182,14 @@ function Row({ job, index }: { job: Job; index: number }) {
               <div
                 style={{
                   // playlist jobs: the bar tracks overall items-done, not the
-                  // current item's byte percent (D54)
+                  // current item's byte percent (D54); fetching shows an
+                  // indeterminate pulse — never a stale percent (d61)
                   width: `${
-                    job.itemsTotal != null
-                      ? ((job.itemsDone ?? 0) / job.itemsTotal) * 100
-                      : (job.pct ?? 0)
+                    job.state === "fetching"
+                      ? 0
+                      : job.itemsTotal != null
+                        ? ((job.itemsDone ?? 0) / job.itemsTotal) * 100
+                        : (job.pct ?? 0)
                   }%`,
                 }}
               />
@@ -194,9 +197,13 @@ function Row({ job, index }: { job: Job; index: number }) {
             <span className="numm">
               {job.itemsTotal != null
                 ? `${job.itemsDone ?? 0}/${job.itemsTotal}`
-                : job.pct != null
-                  ? `${Math.round(job.pct)}%`
-                  : "—"}
+                : job.state === "fetching"
+                  ? // d61: honest liveness — the identity probe is running;
+                    // show elapsed seconds, never a fake percent
+                    `resolving… ${Math.floor((job.fetchMs ?? 0) / 1000)}s`
+                  : job.pct != null
+                    ? `${Math.round(job.pct)}%`
+                    : "—"}
             </span>
           </div>
         </td>

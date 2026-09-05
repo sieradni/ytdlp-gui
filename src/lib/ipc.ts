@@ -159,6 +159,8 @@ export interface Job {
   /** playlist progress (D33): items done / total; null for single videos */
   itemsDone: number | null;
   itemsTotal: number | null;
+  /** d61: ms elapsed in the fetch phase (live ticker while resolving) */
+  fetchMs?: number | null;
   output: string[];
   createdAt: number;
 }
@@ -228,6 +230,16 @@ export const historyImportArchive = (path: string, copy?: boolean) =>
   });
 export const historyRelink = (id: string, path: string | null) =>
   invoke<void>("history_relink", { id, path });
+
+/** d64: archive↔history reconciliation — backfills missing rows, reports
+ * both asymmetries. idempotent; safe to run any time. */
+export interface ReconcileReport {
+  idsInArchive: number;
+  rowsBackfilled: number;
+  rowsWithoutUrl: number;
+}
+export const archiveReconcile = () =>
+  invoke<ReconcileReport>("archive_reconcile");
 
 // ---------------------------------------------------------------------------
 // app paths + version (§7)

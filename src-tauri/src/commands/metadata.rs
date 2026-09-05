@@ -101,7 +101,14 @@ async fn probe(url: &str) -> Result<ResolvedIdentity, String> {
                 if extractor_id.is_none() {
                     if let Some((ex, vid)) = t.split_once(' ') {
                         if !ex.is_empty() && !vid.is_empty() {
-                            extractor_id = Some((ex.to_owned(), vid.to_owned()));
+                            // canonical lowercase: the engine's archive writes
+                            // `%(extractor)s` (soundcloud), while this probe
+                            // used `%(extractor_key)s` (Soundcloud) — the
+                            // d59 gate compared the two case-sensitively and
+                            // dialoged on entries the engine would skip
+                            // (found live by e2e s20). lowercase matches the
+                            // archive writer's form.
+                            extractor_id = Some((ex.to_ascii_lowercase(), vid.to_owned()));
                         }
                     }
                 } else {

@@ -431,18 +431,65 @@ impl JobQueue {
         let url = url_of_options(&options_json);
 
         // ---- fetching: resolve identity (D44 — --print only, never -J) ----
+        // d61: the fetch phase gets a watchdog (90 s) and live stderr — a
+        // bot-gate or geo-block becomes visible within seconds instead of a
+        // frozen "fetching" row with no feedback.
         self.set_state(&id, JobState::Fetching).await;
         self.refresh_yt_dlp_path().await;
 
         let yt_dlp = self.yt_dlp_path().await;
+        // "resolving… Ns" ticker: a lightweight per-second job:update while
+        // the probe runs, so the row shows liveness. aborted the moment the
+        // resolve settles (either branch).
+        let fetch_started = std::time::Instant::now();
+        let ticker = {
+            let app = self.app.clone();
+            let tid = id.clone();
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    let _ = app.emit(
+                        "job:update",
+                        serde_json::json!({
+                            "id": tid, "state": "fetching",
+                            "fetchMs": fetch_started.elapsed().as_millis() as u64,
+                        }),
+                    );
+                }
+            })
+        };
         let identity = tokio::select! {
-            r = resolve_identity(yt_dlp.as_deref(), &url, &opts) => r,
+            // d61: 90 s watchdog — a wedged probe (stalled socket, hung
+            // extractor) must never freeze a row in "fetching" forever. the
+            // kill_on_drop child dies with the future; the error reads like
+            // a human message, not a timeout stack.
+            r = tokio::time::timeout(
+                std::time::Duration::from_secs(FETCH_WATCHDOG_SECS),
+                resolve_identity(yt_dlp.as_deref(), &url, &opts, |line: &str| {
+                    // d61: the probe's stderr streams live into the expando —
+                    // this is where yt-dlp explains a blocked url.
+                    self.push_log(&id, line.to_owned());
+                    let _ = self.app.emit(
+                        "job:log",
+                        serde_json::json!({ "id": id, "line": line, "kind": "info" }),
+                    );
+                }),
+            ) => {
+                match r {
+                    Ok(res) => res,
+                    Err(_) => Err(other(format!(
+                        "could not resolve the url within {FETCH_WATCHDOG_SECS} s — check the url and your connection"
+                    ))),
+                }
+            }
             _ = stop_rx.recv() => {
+                ticker.abort();
                 self.finalize(&id, JobState::Stopped, Some("stopped by user".into())).await;
                 self.cleanup_running(&id, &url, None);
                 return;
             }
         };
+        ticker.abort();
 
         let identity = match identity {
             Ok(i) => i,
@@ -576,6 +623,29 @@ impl JobQueue {
                 items_done,
                 items_total,
             } => {
+                // d62: done means evidence. the after_move:filepath print can
+                // be swallowed (hostile titles defeat any heuristic; custom
+                // templates may not print it) — recover the target by scanning
+                // the destination for the resolved `[<id>]` marker before the
+                // history write, so a completed download can never land as a
+                // metadata-less ghost row.
+                let is_playlist = identity.as_ref().is_some_and(|i| i.is_playlist);
+                let final_path = if is_playlist || final_path.is_some() {
+                    final_path
+                } else {
+                    let dest = self.row(&id).dest;
+                    let recovered = identity_key
+                        .as_deref()
+                        .and_then(|k| k.split_once(' ').map(|(_, vid)| vid))
+                        .and_then(|vid| find_final_path_by_id(&dest, vid));
+                    if let Some(p) = &recovered {
+                        self.push_log(
+                            &id,
+                            format!("final path recovered from destination scan: {p}"),
+                        );
+                    }
+                    recovered
+                };
                 // playlist display title comes from the resolve probe (the
                 // download output's own title lines don't cover playlists)
                 let title = title.or_else(|| identity.as_ref().and_then(|i| i.title.clone()));
@@ -586,7 +656,6 @@ impl JobQueue {
                 // archive entry (yt-dlp wrote the per-item ids itself via
                 // --download-archive) and one history row can't represent
                 // every item.
-                let is_playlist = identity.as_ref().is_some_and(|i| i.is_playlist);
                 if let (Some(key), false) = (&identity_key, is_playlist) {
                     if let Some((ex, vid)) = key.split_once(' ') {
                         if let Err(e) = archive_append(&archive_path_from_settings(), ex, vid) {
@@ -917,6 +986,13 @@ impl JobQueue {
     }
 
     async fn finalize(&self, id: &str, state: JobState, msg: Option<String>) {
+        // the log line MUST land before the event/reload: the frontend pulls
+        // queue_list the moment it sees the terminal job:update, and a row
+        // read between save_row and push_log showed an empty expando for
+        // fetch-phase errors (s9, full-suite find 2026-09-04).
+        if let Some(ref m) = msg {
+            self.push_log(id, m.clone());
+        }
         let mut row = self.row(id);
         row.state = state.as_str().into();
         row.error = msg.clone();
@@ -928,9 +1004,6 @@ impl JobQueue {
             "job:update",
             serde_json::json!({ "id": id, "state": state.as_str(), "error": msg }),
         );
-        if let Some(m) = msg {
-            self.push_log(id, m);
-        }
         self.emit_queue_changed();
     }
 
@@ -1051,10 +1124,13 @@ impl Identity {
 /// resolve the job identity via `--print` only (D44: never -J at queue
 /// time), no download. playlist urls probe with --flat-playlist (one entry
 /// is enough — we only need the playlist id, not the entries).
+/// d61: `on_stderr` receives every stderr line while the probe runs so the
+/// ui can show why a fetch is slow (bot-gates print here within seconds).
 async fn resolve_identity(
     yt_dlp: Option<&std::path::Path>,
     url: &str,
     opts: &JobOptions,
+    on_stderr: impl FnMut(&str),
 ) -> AppResult<Option<Identity>> {
     let mut argv: Vec<String> = vec![
         yt_dlp
@@ -1082,6 +1158,7 @@ async fn resolve_identity(
     let mut rx = process::stream_lines(&mut child)?;
     let mut resolved: Option<Identity> = None;
     let mut errored: Option<String> = None;
+    let mut on_stderr = on_stderr;
 
     // first non-empty stdout line: `extractor|playlist_id|id|playlist_title`;
     // single videos add a second line `TITLE:<title>`.
@@ -1127,6 +1204,7 @@ async fn resolve_identity(
             }
             Some((false, line)) => {
                 let t = line.trim();
+                on_stderr(t);
                 if t.starts_with("ERROR:") {
                     errored = Some(t.to_owned());
                     break;
@@ -1143,6 +1221,41 @@ async fn resolve_identity(
         (None, Some(e)) => Err(other(e)),
         (None, None) => Err(other("could not resolve identity (no output from yt-dlp)")),
     }
+}
+
+/// d61: the fetch phase's watchdog. yt-dlp's own connect timeout can be ~20 s
+/// per attempt across retries; 90 s covers slow-but-alive extractions while
+/// guaranteeing no row can sit in "fetching" forever.
+const FETCH_WATCHDOG_SECS: u64 = 90;
+
+/// d62: recover a finished single-video target by scanning the destination
+/// for yt-dlp's `[<id>]` filename marker (the output template's identity
+/// token). used when the after_move:filepath print was swallowed — a done
+/// job without a recorded path is a trust defect, not a cosmetic one.
+/// skips .part/.temp artifacts; newest mtime wins (re-download case).
+fn find_final_path_by_id(dest: &str, vid: &str) -> Option<String> {
+    let marker = format!(" [{vid}]");
+    let dir = std::path::Path::new(dest);
+    if !dir.is_dir() || vid.is_empty() {
+        return None;
+    }
+    std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().ok().is_some_and(|t| t.is_file()))
+        .filter(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            name.contains(&marker)
+                && !name.ends_with(".part")
+                && !name.ends_with(".temp")
+                && !name.ends_with(".ytdl")
+        })
+        .filter_map(|e| {
+            let mtime = e.metadata().ok()?.modified().ok()?;
+            Some((mtime, e.path().to_string_lossy().into_owned()))
+        })
+        .max_by_key(|(mtime, _)| *mtime)
+        .map(|(_, path)| path)
 }
 
 /// public wrapper for the metadata memo (same normalization as intake).
@@ -1250,6 +1363,34 @@ mod tests {
         let json = options_with_url(&opts, "https://youtu.be/x");
         assert_eq!(url_of_options(&json), "https://youtu.be/x");
         assert_eq!(options_of(&json), opts);
+    }
+
+    #[test]
+    fn final_path_recovery_scans_destination_for_id_marker() {
+        let dir = std::env::temp_dir().join(format!(
+            "ytdlp-gui-test-d62-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        // the done file, a leftover part, and an unrelated file
+        std::fs::write(dir.join("Me at the zoo [jNQXAC9IVRw].opus"), b"x").unwrap();
+        std::fs::write(dir.join("Me at the zoo [jNQXAC9IVRw].opus.part"), b"x").unwrap();
+        std::fs::write(dir.join("other [zzzzzzzzzzz].m4a"), b"x").unwrap();
+        let hit = find_final_path_by_id(&dir.to_string_lossy(), "jNQXAC9IVRw");
+        assert!(
+            hit.as_ref()
+                .is_some_and(|p| p.ends_with("[jNQXAC9IVRw].opus")),
+            "got {hit:?}"
+        );
+        // unknown id → none; empty id → none; missing dir → none
+        assert!(find_final_path_by_id(&dir.to_string_lossy(), "nope").is_none());
+        assert!(find_final_path_by_id(&dir.to_string_lossy(), "").is_none());
+        assert!(find_final_path_by_id("Z:/definitely/not/here", "x").is_none());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
