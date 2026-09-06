@@ -34,19 +34,23 @@ v1 (`gui.py`) stays untouched until v2 reaches feature parity (D32).
 ## releases (m5, §8–9)
 
 pushing a tag `v*` runs `.github/workflows/release.yml`: tauri-action builds the
-unsigned nsis installer, signs the updater artifacts, and attaches `latest.json`
-to the github release — the in-app updater polls that file (launch + 6 h).
+nsis installer, signs the updater artifacts with the repo's minisign key, and
+attaches `latest.json` to the github release — the in-app updater polls that
+file (launch + 6 h) and verifies signatures before installing (D56).
 
 ci (`.github/workflows/ci.yml`) runs the same gates as the local `## checks` on
 every push and pr.
 
-first-release setup (one-time, operator):
+updater signing (done, m7 close-out — for reference):
 
 1. `pnpm tauri signer generate -w ~/.tauri/ytdlp-gui.key` — creates the
-   minisign pair.
-2. add repo secrets `TAURI_SIGNING_PRIVATE_KEY` (+ optional `_PASSWORD`).
-3. paste the **public** key into `tauri.conf.json` → `plugins.updater.pubkey`
-   (replacing the D56 placeholder) and set `bundle.createUpdaterArtifacts: true`
-   in the same commit — until then release builds publish no updater artifacts
-   at all, so ci can never publish a broken `latest.json`.
-4. tag `v0.0.1` (or the real version) and let the workflow publish.
+   password-encrypted minisign pair (private key + password stay in
+   `~/.tauri/` on the operator machine; **back both up** — losing either
+   permanently breaks future in-app updates).
+2. repo secrets set via `gh secret set`: `TAURI_SIGNING_PRIVATE_KEY` = the
+   **raw key file text** (not base64 — the bundler decodes base64 itself),
+   `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` = the key password.
+3. the **base64 public key** is pinned in `tauri.conf.json` →
+   `plugins.updater.pubkey`, and `bundle.createUpdaterArtifacts: true`.
+
+releases are versioned `v2.0.0-alpha.N` prereleases until ga.
