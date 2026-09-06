@@ -97,3 +97,106 @@ export function displayArgv(argv: string[]): string {
     .map((a) => (/^[\w./:\\@%|=<>^,+-]+$/.test(a) ? a : `"${a.replace(/"/g, '\\"')}"`))
     .join(" ");
 }
+
+// ---------------------------------------------------------------------------
+// C5: tier + role classification for the redesigned command preview.
+//
+// two visually separated tiers: what the user asked for (format, destination,
+// playlist, cookies, subtitles — flags that change their result) vs engine
+// plumbing (progress template, prints, archive internals — collapsed behind
+// "show engine details"). roles drive color: amber = user flags, dim =
+// plumbing, green = values, red = destructive (--force-overwrites).
+// classification walks the REAL argv, so the preview can never drift from
+// what runs.
+// ---------------------------------------------------------------------------
+
+export type CmdTokenRole = "prog" | "user" | "plumbing" | "destructive" | "value";
+export interface CmdToken {
+  text: string;
+  role: CmdTokenRole;
+  /** which preview tier a token belongs to (values inherit their flag's) */
+  tier: "user" | "plumbing";
+}
+
+/** engine-internal flags — always appended by the app, never user-chosen */
+const PLUMBING_FLAGS = new Set([
+  "--newline",
+  "--progress",
+  "--no-simulate",
+  "--progress-template",
+  "--print",
+  "--download-archive",
+  "--embed-metadata",
+]);
+
+/** user-facing flags the composer builds */
+const USER_FLAGS = new Set([
+  "--no-playlist",
+  "--playlist-end",
+  "-P",
+  "-f",
+  "-x",
+  "--audio-format",
+  "--embed-thumbnail",
+  "--ppa",
+  "--merge-output-format",
+  "--sub-langs",
+  "--write-subs",
+  "--write-auto-subs",
+  "--sponsorblock-remove",
+  "-o",
+  "--cookies-from-browser",
+  "--cookies",
+]);
+
+/** flags that consume exactly one value token */
+const VALUE_ARITY = new Set([
+  "--progress-template",
+  "--print",
+  "--download-archive",
+  "--playlist-end",
+  "-P",
+  "-f",
+  "--audio-format",
+  "--ppa",
+  "--merge-output-format",
+  "--sub-langs",
+  "--sponsorblock-remove",
+  "-o",
+  "--cookies-from-browser",
+  "--cookies",
+]);
+
+/** classify the exact preview argv into colorable tokens. unknown flags
+ * (extraArgs) classify as user — the worst case is a value rendered amber
+ * instead of green, never a wrong command. */
+export function classifyPreviewArgv(argv: string[]): CmdToken[] {
+  const tokens: CmdToken[] = [];
+  let pendingTier: "user" | "plumbing" | null = null;
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    let role: CmdTokenRole;
+    let tier: "user" | "plumbing" = "user";
+    if (i === 0) {
+      role = "prog";
+    } else if (a === "--force-overwrites") {
+      role = "destructive";
+    } else if (PLUMBING_FLAGS.has(a)) {
+      role = "plumbing";
+      tier = "plumbing";
+    } else if (USER_FLAGS.has(a) || a.startsWith("-")) {
+      role = "user";
+    } else {
+      role = "value";
+      tier = pendingTier ?? "user";
+    }
+    tokens.push({ text: a, role, tier });
+    pendingTier =
+      role === "user" || role === "plumbing"
+        ? VALUE_ARITY.has(a)
+          ? tier
+          : null
+        : null;
+  }
+  return tokens;
+}

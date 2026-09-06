@@ -246,22 +246,27 @@ function AppUpdateRow() {
   const busy = phase === "checking" || phase === "downloading" || phase === "installing";
 
   return (
-    <div className="row flex items-center gap-2">
-      <span className="numm">{appVersion ?? "v?"}</span>
-      <button
-        className="btn sm"
-        disabled={busy}
-        onClick={() => {
-          if (phase === "available") {
-            void startInstall();
-          } else {
-            void useAppUpdate.getState().checkNow(true);
-          }
-        }}
-      >
-        {phase === "available" ? "update & restart" : "check now"}
-      </button>
-      <span className={phase === "error" ? "warn" : "hint"}>{hint}</span>
+    // C6: same stable pattern as ToolRow — version cell fixed-width,
+    // actions right, status message never reflows the version.
+    <div className="toolrow">
+      <div className="toolrow-main">
+        <span className="numm tool-version">{appVersion ?? "v?"}</span>
+        <span className="grow" />
+        <button
+          className={"btn sm" + (phase === "available" ? " primary" : "")}
+          disabled={busy}
+          onClick={() => {
+            if (phase === "available") {
+              void startInstall();
+            } else {
+              void useAppUpdate.getState().checkNow(true);
+            }
+          }}
+        >
+          {phase === "available" ? "update & restart" : "check now"}
+        </button>
+      </div>
+      <div className={phase === "error" ? "toolrow-msg warn" : "toolrow-msg hint"}>{hint}</div>
     </div>
   );
 }

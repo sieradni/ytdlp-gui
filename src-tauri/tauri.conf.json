@@ -10,14 +10,14 @@
     "frontendDist": "../dist/app"
   },
   "app": {
-    "windows": [
-      {
-        "title": "ytdlp-gui",
-        "width": 1000,
-        "height": 720,
-        "minWidth": 620,
-        "minHeight": 400
-      }
+    "windows": [ {
+  "title": "ytdlp-gui",
+  "width": 1000,
+  "height": 720,
+  "minWidth": 620,
+  "minHeight": 400,
+  "backgroundColor": "#0d0f12"
+ }
     ],
     "security": {
       "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: http://asset.localhost data:; font-src 'self' data:; connect-src ipc: http://ipc.localhost",

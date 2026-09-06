@@ -1,6 +1,34 @@
 import { useEffect, useRef, useState } from "react";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { useQueue, type SortKey } from "../stores/queue";
 import type { Job } from "../lib/ipc";
+
+/** C7: reveal-in-explorer whenever a real file exists behind the row
+ * (done, skipped, or error-with-file). async probe like history's —
+ * a vanished file quietly hides the affordance instead of erroring. */
+function useFileExists(p: string | null): boolean {
+  const [exists, setExists] = useState(false);
+  useEffect(() => {
+    let live = true;
+    if (!p) {
+      setExists(false);
+      return;
+    }
+    import("../lib/ipc").then(({ fileExists }) =>
+      fileExists(p)
+        .then((ok) => {
+          if (live) setExists(ok);
+        })
+        .catch(() => {
+          if (live) setExists(false);
+        }),
+    );
+    return () => {
+      live = false;
+    };
+  }, [p]);
+  return exists;
+}
 
 function fmtSpeed(bps: number | null): string {
   if (!bps) return "";
@@ -20,8 +48,18 @@ function Actions({ job }: { job: Job }) {
   const { stop, retry, remove, toggleExpanded } = useQueue();
   const open = useQueue((s) => s.expanded.has(job.id));
   const busy = job.state === "downloading" || job.state === "post";
+  const fileExists = useFileExists(job.finalPath);
   return (
     <div className="actions-cell">
+      {fileExists && (
+        <button
+          className="iconbtn"
+          title="show in explorer"
+          onClick={() => void revealItemInDir(job.finalPath!).catch(() => {})}
+        >
+          ❋
+        </button>
+      )}
       {(job.state === "downloading" || job.state === "post" || job.state === "queued") && (
         <button className="iconbtn" title="stop — keeps partial files" onClick={() => void stop(job.id)}>
           ■
@@ -74,15 +112,31 @@ function LogRow({ job }: { job: Job }) {
   );
 }
 
-function HoverCard({ job, anchor }: { job: Job; anchor: HTMLElement }) {
+/** C3: the hover card is a real interaction surface — it stays while the
+ * pointer is on IT (not just the row), hides after a 300 ms grace when the
+ * pointer leaves both, and carries its own actions. the old version died
+ * with the row's mouseout (even when moving INTO the card), so tooltips
+ * "flashed away" the moment the pointer crossed the gap. text is
+ * selectable (C4); path gets double-click-to-copy. */
+function HoverCard({
+  job,
+  anchor,
+  onIntent,
+}: {
+  job: Job;
+  anchor: HTMLElement;
+  onIntent: (inside: boolean) => void;
+}) {
   const r = anchor.getBoundingClientRect();
+  const fileExists = useFileExists(job.finalPath);
+  const [copied, setCopied] = useState(false);
   const style: React.CSSProperties = {
     position: "fixed",
     zIndex: 60,
     width: 440,
     maxWidth: "calc(100vw - 24px)",
     left: Math.min(r.right + 10, window.innerWidth - 452),
-    top: Math.min(r.top, window.innerHeight - 200),
+    top: Math.min(r.top, window.innerHeight - 220),
     background: "var(--bg-2)",
     border: "1px solid var(--amber-border)",
     borderRadius: 6,
@@ -91,8 +145,19 @@ function HoverCard({ job, anchor }: { job: Job; anchor: HTMLElement }) {
     fontSize: 11.5,
     lineHeight: 1.55,
   };
+  const copyPath = () => {
+    if (!job.finalPath) return;
+    void navigator.clipboard.writeText(job.finalPath);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1200);
+  };
   return (
-    <div style={style} className="hovercard-shown">
+    <div
+      style={style}
+      className="hovercard-shown"
+      onMouseEnter={() => onIntent(true)}
+      onMouseLeave={() => onIntent(false)}
+    >
       <div style={{ fontWeight: 700, fontSize: 12.5, marginBottom: 4, overflowWrap: "anywhere" }}>
         {job.title ?? "fetching…"}
       </div>
@@ -110,18 +175,43 @@ function HoverCard({ job, anchor }: { job: Job; anchor: HTMLElement }) {
           </>
         )}
         <span>destination</span>
-        <span style={{ color: "var(--text)", overflowWrap: "anywhere" }}>
+        <span
+          style={{ color: "var(--text)", overflowWrap: "anywhere", cursor: job.finalPath ? "text" : undefined }}
+          title={job.finalPath ? "double-click to copy" : undefined}
+          onDoubleClick={copyPath}
+        >
           {job.finalPath ?? "(not yet)"}
         </span>
       </div>
+      {(fileExists || job.finalPath) && (
+        <div style={{ display: "flex", gap: 6, justifyContent: "flex-end", marginTop: 8 }}>
+          {fileExists && (
+            <button
+              className="btn sm ghost"
+              onClick={() => void revealItemInDir(job.finalPath!).catch(() => {})}
+            >
+              show in explorer
+            </button>
+          )}
+          <button className="btn sm ghost" onClick={copyPath} disabled={!job.finalPath}>
+            {copied ? "copied ✓" : "copy path"}
+          </button>
+        </div>
+      )}
     </div>
   );
 }
 
 function Row({ job, index }: { job: Job; index: number }) {
   const { toggleExpanded } = useQueue();
-  const [hoverTimer, setHoverTimer] = useState<ReturnType<typeof setTimeout> | null>(null);
+  // C3 hover model: enter opens after a short dwell; leaving the row starts
+  // a 300 ms grace timer that the CARD cancels by reporting intent — moving
+  // the pointer across the gap (or onto the card) never closes it. leaving
+  // both, or opening the log row, closes immediately.
   const [hoverJob, setHoverJob] = useState<Job | null>(null);
+  const dwellTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const graceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const cardIntent = useRef(false);
   const rowRef = useRef<HTMLTableRowElement>(null);
   const open = useQueue((s) => s.expanded.has(job.id));
   // completion feedback in-place (§6): a one-shot row flash when a job lands
@@ -138,16 +228,38 @@ function Row({ job, index }: { job: Job; index: number }) {
     }
   }, [job.state]);
 
-  const armHover = () => {
-    if (hoverTimer) clearTimeout(hoverTimer);
-    const t = setTimeout(() => {
-      if (rowRef.current) setHoverJob(job);
-    }, 600);
-    setHoverTimer(t);
+  const clearTimers = () => {
+    if (dwellTimer.current) clearTimeout(dwellTimer.current);
+    if (graceTimer.current) clearTimeout(graceTimer.current);
+    dwellTimer.current = null;
+    graceTimer.current = null;
   };
-  const disarmHover = () => {
-    if (hoverTimer) clearTimeout(hoverTimer);
-    setHoverTimer(null);
+  const closeCard = () => {
+    clearTimers();
+    cardIntent.current = false;
+    setHoverJob(null);
+  };
+  const onRowEnter = () => {
+    clearTimers();
+    dwellTimer.current = setTimeout(() => {
+      if (rowRef.current) setHoverJob(job);
+    }, 350);
+  };
+  const onRowLeave = () => {
+    if (dwellTimer.current) clearTimeout(dwellTimer.current);
+    dwellTimer.current = null;
+    graceTimer.current = setTimeout(() => {
+      if (!cardIntent.current) setHoverJob(null);
+    }, 300);
+  };
+  const onCardIntent = (inside: boolean) => {
+    cardIntent.current = inside;
+    if (inside) {
+      if (graceTimer.current) clearTimeout(graceTimer.current);
+      graceTimer.current = null;
+    } else {
+      closeCard();
+    }
   };
 
   return (
@@ -157,11 +269,8 @@ function Row({ job, index }: { job: Job; index: number }) {
         className="qrow"
         data-status={job.state}
         data-flash={doneFlash ? "done" : undefined}
-        onMouseOver={armHover}
-        onMouseOut={() => {
-          disarmHover();
-          setHoverJob(null);
-        }}
+        onMouseEnter={onRowEnter}
+        onMouseLeave={onRowLeave}
       >
         <td className="idx">{index + 1}</td>
         <td>
@@ -214,7 +323,9 @@ function Row({ job, index }: { job: Job; index: number }) {
         </td>
       </tr>
       <LogRow job={job} />
-      {hoverJob && rowRef.current && <HoverCard job={hoverJob} anchor={rowRef.current} />}
+      {hoverJob && rowRef.current && (
+        <HoverCard job={hoverJob} anchor={rowRef.current} onIntent={onCardIntent} />
+      )}
       {/* open state re-derived so log rows track expansion */}
       {open ? null : null}
     </>

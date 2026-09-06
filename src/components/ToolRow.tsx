@@ -72,38 +72,50 @@ export default function ToolRow({ status }: { status: ToolStatus }) {
   return (
     <>
       <label>{status.tool}</label>
-      <div className="row flex flex-wrap items-center gap-2">
-        {status.installed ? (
-          <span className="numm">{status.version}</span>
-        ) : (
-          <span className="hint">not installed</span>
-        )}
-        {status.custom && <span className="hint">· custom path</span>}
-        {status.staged && (
-          // d65: staged is a first-class step, not a footnote — the badge
-          // said "update available" while the version row kept the old
-          // number because windows locks the running exe. say exactly what
-          // finishes it.
-          <span className="warn">· restart the app to finish the update</span>
-        )}
-        {badge && !status.custom && !status.staged && (
-          <span className="warn">→ {badge} available</span>
-        )}
-        <button className="btn sm" onClick={check} disabled={busy !== ""}>
-          check
-        </button>
-        <button
-          className={"btn sm" + (badge ? " primary" : "")}
-          onClick={update}
-          disabled={busy !== "" || !status.installed}
-          title="download latest build, verify, swap atomically — never automatic"
-        >
-          update
-        </button>
-        <button className="btn sm ghost" onClick={setCustom} title="point at your own copy (scoop, PATH) — disables managed updates">
-          custom…
-        </button>
-        {msg && <span className="hint">{msg}</span>}
+      {/* C1/C6: stable columns — version never reflows when badges or
+          messages appear (the "number on both sides" bug was the version
+          wrapping around a growing inline row); message gets its own line. */}
+      <div className="toolrow">
+        <div className="toolrow-main">
+          {status.installed ? (
+            <span className="numm tool-version" title={status.path ?? undefined}>
+              {status.version}
+            </span>
+          ) : (
+            <span className="hint tool-version">not installed</span>
+          )}
+          {status.custom && <span className="hint">· custom path</span>}
+          {status.staged && (
+            // d65: staged is a first-class step, not a footnote — the badge
+            // said "update available" while the version row kept the old
+            // number because windows locks the running exe. say exactly what
+            // finishes it.
+            <span className="warn">restart the app to finish the update</span>
+          )}
+          {badge && !status.custom && !status.staged && (
+            <span className="warn">→ {badge} available</span>
+          )}
+          <span className="grow" />
+          <button className="btn sm" onClick={check} disabled={busy !== ""}>
+            check
+          </button>
+          <button
+            className={"btn sm" + (badge ? " primary" : "")}
+            onClick={update}
+            disabled={busy !== "" || !status.installed}
+            title="download latest build, verify, swap atomically — never automatic"
+          >
+            update
+          </button>
+          <button
+            className="btn sm ghost"
+            onClick={setCustom}
+            title="point at your own copy (scoop, PATH) — disables managed updates"
+          >
+            custom…
+          </button>
+        </div>
+        {msg && <div className="toolrow-msg hint">{msg}</div>}
       </div>
     </>
   );

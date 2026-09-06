@@ -18,7 +18,7 @@ export default function TabBar() {
 
   return (
     <header
-      className="flex-none flex items-center gap-1 h-11 px-3.5"
+      className="flex-none flex items-center gap-1 h-8 px-3"
       style={{ background: "var(--bg-1)", borderBottom: "1px solid var(--border)" }}
     >
       {TABS.map((t) => (

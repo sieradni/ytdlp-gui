@@ -4,7 +4,7 @@ import { confirmDialog } from "./ConfirmDialog";
 import { useQueue } from "../stores/queue";
 import { useSettings } from "../stores/settings";
 import { migrationStatus, overwriteTargets, type AudioFormat, type JobOptions, type PlaylistMode } from "../lib/ipc";
-import { buildPreviewArgs, displayArgv } from "../lib/cmdPreview";
+import { buildPreviewArgs, classifyPreviewArgv, displayArgv, type CmdToken } from "../lib/cmdPreview";
 import { defaultOptions } from "../lib/defaults";
 
 /**
@@ -83,13 +83,14 @@ export default function Composer() {
   const urlCount = urls.split("\n").filter((l) => l.trim()).length;
   const note = opts.dlType === "audio" ? FORMAT_NOTES[opts.audioFormat] ?? "" : "";
 
-  const argv = useMemo(
-    () =>
-      displayArgv(
-        buildPreviewArgs(opts, dest || "<destination>", opts.skipDownloaded ? "<archive>" : null),
-      ),
+  const previewArgv = useMemo(
+    () => buildPreviewArgs(opts, dest || "<destination>", opts.skipDownloaded ? "<archive>" : null),
     [opts, dest],
   );
+  const argv = useMemo(() => displayArgv(previewArgv), [previewArgv]);
+  // C5: classified tokens drive the tiered, color-coded preview
+  const tokens = useMemo(() => classifyPreviewArgv(previewArgv), [previewArgv]);
+  const [showPlumbing, setShowPlumbing] = useState(false);
 
   const pickFolder = async (current: string) => {
     const picked = await open({ directory: true, defaultPath: current || undefined });
@@ -369,18 +370,24 @@ export default function Composer() {
 
         <div className="divider" />
 
-        <div
-          className="cmd-preview"
-          title="click to copy"
-          onClick={() => {
-            void navigator.clipboard.writeText(displayArgv(buildPreviewArgs(opts, dest || ".", opts.skipDownloaded ? "." : null)));
+        {/* C5: the redesigned command preview — two tiers, color roles.
+         * amber = flags you chose (they change your result), dim = engine
+         * plumbing (collapsed until asked), green = values, red =
+         * destructive. argument order among these flags does not matter;
+         * this is the exact argv, so it is always truthful. text is
+         * selectable (C4); the copy button copies the exact line. */}
+        <CmdPreview
+          tokens={tokens}
+          plain={argv}
+          showPlumbing={showPlumbing}
+          onTogglePlumbing={() => setShowPlumbing((v) => !v)}
+          copied={copied}
+          onCopy={() => {
+            void navigator.clipboard.writeText(argv);
             setCopied(true);
             setTimeout(() => setCopied(false), 1200);
           }}
-        >
-          {argv}
-          {copied && <span style={{ color: "var(--green)" }}> — copied</span>}
-        </div>
+        />
 
         <div className="flex items-center gap-2" style={{ marginTop: 10 }}>
           <button className="btn primary" onClick={queue}>
@@ -542,6 +549,47 @@ export default function Composer() {
             </div>
           </>
         )}
+      </div>
+    </div>
+  );
+}
+
+/** C5: tiered, color-coded command preview. tier "user" always shows;
+ * tier "plumbing" collapses behind the toggle. roles: amber user flags,
+ * dim plumbing, green values, red destructive. */
+function CmdPreview(props: {
+  tokens: CmdToken[];
+  plain: string;
+  showPlumbing: boolean;
+  onTogglePlumbing: () => void;
+  copied: boolean;
+  onCopy: () => void;
+}) {
+  const visible = props.tokens.filter((t) => props.showPlumbing || t.tier === "user");
+  const plumbingCount = props.tokens.filter((t) => t.tier === "plumbing").length;
+  return (
+    <div className="cmdprev">
+      <div className="cmdprev-head">
+        <span className="hint">command preview — order of flags doesn't matter; this is the exact argv</span>
+        <span className="grow" />
+        {plumbingCount > 0 && (
+          <button className="btn sm ghost" onClick={props.onTogglePlumbing}>
+            {props.showPlumbing ? "hide engine details" : `show engine details (${plumbingCount})`}
+          </button>
+        )}
+        <button className="btn sm ghost" onClick={props.onCopy}>
+          {props.copied ? "copied ✓" : "copy"}
+        </button>
+      </div>
+      <div className="cmd-preview cmdprev-body">
+        {visible.map((t, i) => (
+          <span key={i} className={`cmdtok cmdtok-${t.role}`}>
+            {t.text.includes(" ")
+              ? `"${t.text.replace(/"/g, '\\"')}"`
+              : t.text}{" "}
+          </span>
+        ))}
+        {props.copied && <span className="cmdtok-copied">— copied</span>}
       </div>
     </div>
   );

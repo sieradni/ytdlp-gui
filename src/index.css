@@ -18,24 +18,34 @@ html,
 body,
 #root {
   height: 100%;
+  background: var(--bg);
 }
 body {
   margin: 0;
+  /* C8: the webview paints on its first commit; a matching window
+     backgroundColor (tauri.conf.json) + html bg kill the white resize/
+     startup flash — both sides of the swap carry the token. */
   background: var(--bg);
   color: var(--text);
   font-family: var(--mono);
   font-size: 13px;
   line-height: 1.5;
   overflow: hidden;
-  user-select: none;
 }
 ::placeholder {
   color: var(--faint);
 }
-input,
-textarea,
-select {
-  user-select: text;
+/* C4: interactive chrome is not selectable (buttons, tabs, row actions,
+ * column headers) — selecting there is never useful and double-clicks on
+ * content must not grab chrome glyphs. */
+.btn,
+.iconbtn,
+.tab-btn,
+.actions-cell,
+thead th,
+label,
+.card-h h2 {
+  user-select: none;
 }
 
 /* ===== custom scrollbars — every scroll container (D23) ===== */
@@ -58,15 +68,15 @@ select {
   background: var(--amber);
 }
 
-/* ===== tab bar (D12: top tabs, amber underline, no sidebar) ===== */
+/* ===== tab bar (D12: top tabs, amber underline, no sidebar; C2: slim) ===== */
 .tab-btn {
   font-family: var(--mono);
-  font-size: 13px;
+  font-size: 12.5px;
   background: none;
   border: none;
   color: var(--muted);
   cursor: pointer;
-  padding: 0 14px;
+  padding: 0 12px;
   height: 100%;
   border-bottom: 2px solid transparent;
 }
@@ -258,6 +268,33 @@ textarea {
   white-space: nowrap;
 }
 
+/* ===== C1: stable tool rows + numeric discipline =====
+ * versions/percentages render in tabular-nums, fixed-width contexts; a
+ * tool row is name / version+actions / message — the version cell never
+ * reflows when a badge or status message appears. */
+.toolrow {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.toolrow-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.tool-version {
+  min-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.toolrow-msg {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* ===== form grid ===== */
 .fgrid {
   display: grid;
@@ -436,7 +473,17 @@ tbody tr:hover {
   border-radius: 3px;
 }
 
-/* ===== command preview (§6 live argv) ===== */
+/* ===== command preview (§6 live argv; C5 tiered redesign) ===== */
+.cmdprev {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.cmdprev-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
 .cmd-preview {
   font-size: 11.5px;
   line-height: 1.6;
@@ -445,13 +492,34 @@ tbody tr:hover {
   border-radius: var(--radius);
   padding: 8px 10px;
   color: #a8b6c4;
-  cursor: pointer;
   overflow-x: auto;
   white-space: nowrap;
   user-select: text;
 }
 .cmd-preview:hover {
   border-color: var(--amber-border);
+}
+/* C5 color roles: amber = flags you chose, dim = engine plumbing,
+ * green = values, red = destructive, bold-white = program. */
+.cmdtok-prog {
+  color: var(--text);
+  font-weight: 700;
+}
+.cmdtok-user {
+  color: var(--amber);
+}
+.cmdtok-plumbing {
+  color: var(--faint);
+}
+.cmdtok-value {
+  color: var(--green);
+}
+.cmdtok-destructive {
+  color: var(--red);
+  font-weight: 700;
+}
+.cmdtok-copied {
+  color: var(--green);
 }
 
 /* ===== expandable log row (§6 per-item output) ===== */
