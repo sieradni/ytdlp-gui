@@ -15,6 +15,39 @@ use tauri::Manager;
 pub fn run() {
     let mut settings = settings::load();
 
+    // d75 one-time legacy migration: older versions let settings point the
+    // engine at an arbitrary archive file (a v1-shared downloaded.txt, or a
+    // path set by the old import). the app now owns its archive exclusively,
+    // so a legacy custom path is union-merged into the app archive once and
+    // the setting cleared — nothing is lost, nothing external is referenced.
+    if let Some(custom) = settings
+        .archive_path
+        .clone()
+        .filter(|p| !p.trim().is_empty())
+    {
+        let custom_path = std::path::PathBuf::from(&custom);
+        let dest = store::default_archive_path();
+        let outcome = if !custom_path.is_file() {
+            // stale path (file gone) — nothing to rescue, clear quietly
+            Some((0usize, "(file gone)".to_owned()))
+        } else {
+            std::fs::read_to_string(&custom_path)
+                .ok()
+                .and_then(|text| store::merge_into_archive(&dest, &text).ok())
+                .map(|added| (added, dest.display().to_string()))
+        };
+        match outcome {
+            Some((added, where_)) => {
+                settings.archive_path = None;
+                let _ = settings::save(&settings);
+                eprintln!("d75: custom archive {custom} merged into {where_} (+{added} entries)");
+            }
+            // merge failure keeps the setting — retried next launch, and the
+            // engine keeps using the file the user actually has until then.
+            None => eprintln!("d75: custom archive merge failed, setting kept: {custom}"),
+        }
+    }
+
     // sqlite: history metadata + persistent queue (§5.3, §5 queue model)
     let db = Arc::new(Db::open(&store::db_path()).expect("failed to open history.db"));
     db.normalize_after_restart()
@@ -96,6 +129,7 @@ pub fn run() {
             commands::history::history_relink,
             commands::history::file_exists,
             commands::history::archive_reconcile,
+            commands::history::archive_export,
             commands::app::app_reset_data,
             commands::app::e2e_artifacts_report,
             commands::app::e2e_artifacts_remove,

@@ -48,21 +48,24 @@ label,
   user-select: none;
 }
 
-/* ===== custom scrollbars — every scroll container (D23) ===== */
+/* ===== custom scrollbars — every scroll container (D23) =====
+ * d79: 8px thin was too fine to grab (user-reported). 11px, higher-
+ * contrast thumb, amber on hover. */
 * {
-  scrollbar-width: thin;
-  scrollbar-color: var(--bg-3) transparent;
+  scrollbar-width: auto;
+  scrollbar-color: #3a434e transparent;
 }
 ::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+  width: 11px;
+  height: 11px;
 }
 ::-webkit-scrollbar-track {
   background: var(--bg-1);
 }
 ::-webkit-scrollbar-thumb {
-  background: var(--bg-3);
-  border-radius: 4px;
+  background: #3a434e;
+  border-radius: 6px;
+  border: 2px solid var(--bg-1);
 }
 ::-webkit-scrollbar-thumb:hover {
   background: var(--amber);
@@ -520,6 +523,73 @@ tbody tr:hover {
 }
 .cmdtok-copied {
   color: var(--green);
+}
+
+/* ===== d77: app card rows (version / license / reset) — label + value
+ * pairs without abusing the form grid (the old fgrid dropped a free
+ * hint div into the label column and misaligned the card). */
+.app-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 5px 0;
+}
+.app-key {
+  flex: 0 0 150px;
+  color: var(--text);
+  font-weight: 600;
+  font-size: 12px;
+}
+
+/* ===== d79: the page pane reads as a deliberate scroll region, and pages
+ * never end flush at the viewport edge (user-reported "bottom cut off"). */
+main.scrollpane {
+  border-top: 1px solid var(--border);
+}
+main.scrollpane::-webkit-scrollbar-thumb {
+  border: none;
+}
+.page {
+  padding-bottom: 44px;
+}
+
+/* ===== d76: bounded history (mirrors the queue table's 400px pane) ===== */
+.hist-scroll {
+  max-height: 420px;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+.hist-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--bg-1);
+  box-shadow: 0 1px 0 var(--border);
+}
+.hist-msg {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+/* ===== d75 choice dialog (two real options + cancel) ===== */
+.cdlg-choices {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 0 18px 14px;
+}
+.cdlg .choice {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  text-align: left;
+  padding: 9px 12px;
+}
+.cdlg .choice .choice-desc {
+  font-weight: 400;
+  font-size: 11.5px;
+  color: var(--muted);
 }
 
 /* ===== expandable log row (§6 per-item output) ===== */

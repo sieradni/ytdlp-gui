@@ -14,6 +14,12 @@ import { useBinaries } from "../stores/binaries";
  * update. "update = download latest build, verify sha-256, swap atomically.
  * never automatic." ffmpeg's update is strictly user-initiated (D20).
  */
+/** d77: btbN's rolling release is literally tagged "latest" — showing
+ * `latest: latest` confused everyone. name it for what it is instead. */
+function latestDisplay(tag: string): string {
+  return tag === "latest" ? "rolling release (btbn)" : tag;
+}
+
 export default function ToolRow({ status }: { status: ToolStatus }) {
   const refresh = useBinaries((s) => s.refresh);
   const availableTag = useBinaries((s) => s.availableTags[status.tool]);
@@ -103,7 +109,7 @@ export default function ToolRow({ status }: { status: ToolStatus }) {
             className={"btn sm" + (badge ? " primary" : "")}
             onClick={update}
             disabled={busy !== "" || !status.installed}
-            title="download latest build, verify, swap atomically — never automatic"
+            title="download and install the latest build — never automatic"
           >
             update
           </button>
@@ -119,7 +125,7 @@ export default function ToolRow({ status }: { status: ToolStatus }) {
           {msg
             ? msg
             : status.lastChecked
-              ? `last checked ${new Date(status.lastChecked * 1000).toLocaleString()}${status.latestTag ? ` · latest: ${status.latestTag}` : ""}`
+              ? `last checked ${new Date(status.lastChecked * 1000).toLocaleString()}${status.latestTag ? ` · latest: ${latestDisplay(status.latestTag)}` : ""}`
               : "never checked"}
         </div>
       </div>

@@ -29,7 +29,10 @@ pub struct MigrationReport {
     pub dropped_keys: Vec<String>,
     /// ids seeded into history from the archive.
     pub history_seeded: u64,
-    /// archive now pointed at the v1 file in place (D43).
+    /// entries union-merged into the app-owned archive (D75; was "points at
+    /// the v1 file in place" under D43).
+    pub archive_merged: u64,
+    /// the app-owned archive path after the merge (reporting only).
     pub archive_path: Option<String>,
     /// v1 binary paths — offered as custom binaries in the wizard (D40),
     /// never auto-applied.
@@ -199,12 +202,19 @@ pub fn apply(
     report.migrated_options = Some(opts.clone());
     *composer_defaults = Some(opts);
 
-    // archive in place (D43) + ids seeded into history either way
+    // archive: ids seeded into history; the v1 file itself is union-merged
+    // into the app-owned archive (D75) and never referenced afterwards.
     if archive.is_file() {
-        report.archive_path = Some(archive.to_string_lossy().into_owned());
-        settings.archive_path = report.archive_path.clone();
         let text = std::fs::read_to_string(&archive).unwrap_or_default();
         report.history_seeded = db.seed_history_from_archive(&text)? as u64;
+        let dest = crate::store::default_archive_path();
+        match crate::store::merge_into_archive(&dest, &text) {
+            Ok(added) => {
+                report.archive_merged = added as u64;
+                report.archive_path = Some(dest.to_string_lossy().into_owned());
+            }
+            Err(e) => eprintln!("v1 migration: archive merge failed (ids still seeded): {e}"),
+        }
     }
 
     // v1 binaries → custom-binary offer in the wizard (§11 table row 4).

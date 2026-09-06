@@ -478,6 +478,31 @@ pub fn resolve_tool_path(m: &Manifest, tool: Tool) -> Option<PathBuf> {
     managed.is_file().then_some(managed)
 }
 
+/// d77: normalize a manifest version for display at read time. manifests
+/// written before D65 store ffmpeg's raw banner token — surfacing it raw
+/// (e.g. `N-126404-g818e5d965b-20260904`) is unreadable and made users
+/// think the version display was broken. re-parsing the stored token
+/// through parse_ffmpeg_version heals every legacy manifest without a
+/// migration: nightly builds show the build date, tagged releases pass
+/// through. yt-dlp versions are clean semver-ish strings — untouched.
+fn display_version(tool: Tool, entry: &ToolEntry) -> String {
+    match tool {
+        Tool::YtDlp => entry.version.clone(),
+        Tool::Ffmpeg => {
+            // accept both shapes a manifest can hold: the bare token
+            // (current detect_version) or a full `-version` banner line
+            // (pre-D65 manifests) — never double-prefix the latter.
+            let raw = entry.version.trim();
+            let line = if raw.starts_with("ffmpeg version") {
+                raw.to_owned()
+            } else {
+                format!("ffmpeg version {raw} (display)")
+            };
+            parse_ffmpeg_version(&line).unwrap_or_else(|| entry.version.clone())
+        }
+    }
+}
+
 pub fn status(m: &Manifest) -> BinaryManifest {
     let mk = |tool: Tool| {
         let entry = m.entry(tool);
@@ -490,7 +515,9 @@ pub fn status(m: &Manifest) -> BinaryManifest {
         ToolStatus {
             tool,
             installed,
-            version: entry.filter(|_| installed).map(|e| e.version.clone()),
+            version: entry
+                .filter(|_| installed)
+                .map(|e| display_version(tool, e)),
             path: path.map(|p| p.to_string_lossy().into_owned()),
             custom,
             // update availability is computed by the check command (network);
@@ -684,6 +711,40 @@ mod tests {
             assert_eq!(resolved2, None);
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn display_version_heals_legacy_raw_ffmpeg_strings_d77() {
+        // verbatim live strings: the btbN nightly banner token this user
+        // saw in the ui ("N-126404-g818e5d965b-20260904"), and a pre-D65
+        // manifest that stored the whole banner line.
+        let mk = |v: &str| ToolEntry {
+            version: v.into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            display_version(Tool::Ffmpeg, &mk("N-126404-g818e5d965b-20260904")),
+            "nightly 2026-09-04"
+        );
+        assert_eq!(
+            display_version(
+                Tool::Ffmpeg,
+                &mk(
+                    "ffmpeg version N-126404-g818e5d965b-20260904 Copyright (c) 2000-2026 the FFmpeg developers",
+                ),
+            ),
+            "nightly 2026-09-04"
+        );
+        // already-clean tagged releases pass through untouched
+        assert_eq!(
+            display_version(Tool::Ffmpeg, &mk("7.1.1-essentials_build")),
+            "7.1.1-essentials_build"
+        );
+        // yt-dlp strings are never reinterpreted
+        assert_eq!(
+            display_version(Tool::YtDlp, &mk("2026.08.19")),
+            "2026.08.19"
+        );
     }
 
     #[test]

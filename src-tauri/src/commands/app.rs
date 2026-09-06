@@ -11,19 +11,18 @@ use crate::error::{other, AppResult};
 // reset app data (d69)
 // ---------------------------------------------------------------------------
 
-/// what a reset removed (or why it refused). everything except bin/ and the
-/// archive lives in the app-data dir; the double-confirm lives in the ui.
+/// what a reset removed (or why it refused). everything except bin/ lives
+/// in the app-data dir; the double-confirm lives in the ui.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResetReport {
     pub settings_removed: bool,
     pub jobs_cleared: u64,
     pub history_cleared: u64,
-    /// the archive file itself — called out by name in the ui (⚠ it may be
-    /// the user's cross-tool yt-dlp archive, so reset only deletes it when it
-    /// is NOT a custom user path).
+    /// the app-owned archive file (app-data\downloaded.txt) — called out by
+    /// name in the ui. D75: there is no custom archive path anymore, so the
+    /// archive is always app data and reset always clears it.
     pub archive_removed: bool,
-    pub archive_was_custom: bool,
 }
 
 /// wipe queue + history + settings (and the default-path archive). managed
@@ -45,12 +44,7 @@ pub fn app_reset_data(
         )));
     }
 
-    let s = settings.get();
-    let archive_custom = s
-        .archive_path
-        .as_deref()
-        .is_some_and(|p| !p.trim().is_empty());
-    let archive_path = crate::store::archive_path_from_settings_with(&s);
+    let archive_path = crate::store::default_archive_path();
 
     // jobs + history: delete in place (the Db handle is shared with the
     // queue, so the file cannot be dropped while the app runs), then vacuum
@@ -67,20 +61,14 @@ pub fn app_reset_data(
     let settings_removed = std::fs::remove_file(crate::settings::settings_path()).is_ok();
     settings.reset_to_defaults()?;
 
-    // the default-path archive is ours; a custom archive path belongs to the
-    // user's wider tooling (v1 shared it) and is never touched.
-    let archive_removed = if archive_custom {
-        false
-    } else {
-        std::fs::remove_file(&archive_path).is_ok()
-    };
+    // the archive is app data (D75) — reset clears it like everything else.
+    let archive_removed = std::fs::remove_file(&archive_path).is_ok();
 
     Ok(ResetReport {
         settings_removed,
         jobs_cleared,
         history_cleared,
         archive_removed,
-        archive_was_custom: archive_custom,
     })
 }
 

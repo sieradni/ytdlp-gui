@@ -69,7 +69,7 @@ pub struct AppPaths {
 #[tauri::command]
 pub fn app_paths() -> AppPaths {
     AppPaths {
-        archive_path: crate::store::archive_path_from_settings()
+        archive_path: crate::store::default_archive_path()
             .to_string_lossy()
             .into_owned(),
         bin_dir: crate::binaries::manager::bin_dir()

@@ -165,7 +165,7 @@ export default function Composer() {
     <div className="card">
       <div className="card-h">
         <h2>add downloads</h2>
-        <span className="hint">one url per line · playlists expand · enter to queue</span>
+        <span className="hint">one url per line · playlist urls fetch multiple items · enter to queue</span>
       </div>
       <div className="card-b">
         <textarea
@@ -192,6 +192,7 @@ export default function Composer() {
               type="text"
               className="grow"
               value={dest}
+              placeholder="windows downloads folder (default set in settings)"
               onChange={(e) => {
                 setDestTouched(true);
                 setDest(e.target.value);

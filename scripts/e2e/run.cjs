@@ -66,6 +66,7 @@ const SOURCE = {
   10: "other", 12: "other", 11: "youtube", 13: "youtube", 14: "other",
   8: "youtube", 7: "youtube", 5: "youtube", 6: "youtube", 15: "youtube",
   16: "youtube", 18: "other",  19: "other", 20: "other", 21: "none", 22: "none",
+  23: "none",
 };
 
 // ---------------------------------------------------------------------------
@@ -1279,7 +1280,7 @@ async function main() {
     ? process.argv[process.argv.indexOf("--only") + 1].split(",").map(Number)
     : null;
   if (process.argv.includes("--fresh") || !only) wipeState();
-  let order = [1, 4, 3, 2, 9, 10, 12, 11, 13, 14, 8, 7, 5, 6, 15, 16, 18, 19, 20, 21, 22];
+  let order = [1, 4, 3, 2, 9, 10, 12, 11, 13, 14, 8, 7, 5, 6, 15, 16, 18, 19, 20, 21, 22, 23];
   if (process.argv.includes("--smoke")) order = order.filter((n) => SOURCE[n] !== "youtube");
   const toRun = only ? order.filter((n) => only.includes(n)) : order;
   if (toRun.length === 0) {
@@ -1466,6 +1467,57 @@ S[22] = async () => {
     details);
 };
 
+// 23 — archive import semantics (d75), zero network: merge unions into the
+// app-owned archive (picked file untouched); replace swaps the archive's
+// contents without deleting history rows; a re-import reports 0 new.
+S[23] = async () => {
+  const details = [];
+  const arch = path.join(DATA_DIR, "downloaded.txt");
+  // per-run unique ids — the scenario must be self-contained against prior
+  // runs' leftovers in the shared sandbox profile (the S21 lesson).
+  const T = Date.now();
+  const A = `e2eA${T}`, B = `e2eB${T}`, C = `e2eC${T}`;
+  // a foreign "picked" file OUTSIDE the data dir — the app must never
+  // point settings/engine at it, never modify it.
+  const picked = path.join(DATA_DIR, "..", `e2e-import-${T}.txt`);
+  const call = (mode) => evalAsync(
+    ws,
+    `window.__e2e.ipc('history_import_archive', { path: ${JSON.stringify(picked)}${mode ? `, mode: '${mode}'` : ""} })`,
+  );
+  fs.writeFileSync(picked, `e2esrc ${A}\ne2esrc ${B}\n`);
+  // merge: the app archive gains exactly the picked file's 2 entries
+  const r1 = await call("merge");
+  const afterMerge = fs.readFileSync(arch, "utf8");
+  details.push(`merge: imported=${r1.idsImported} archiveAdded=${r1.archiveAdded} path=${r1.archivePath === arch ? "app-data" : r1.archivePath}`);
+  // an app-side entry enters the archive + history (reconcile), then the
+  // same file re-imports: union keeps both sides, counts only new (0).
+  fs.appendFileSync(arch, `e2eapp ${C}\n`);
+  await evalAsync(ws, `window.__e2e.ipc('archive_reconcile')`);
+  const r2 = await call("merge");
+  const afterMerge2 = fs.readFileSync(arch, "utf8");
+  const pickedUntouched = fs.readFileSync(picked, "utf8") === `e2esrc ${A}\ne2esrc ${B}\n`;
+  // replace: archive takes ONLY the picked file's content; history keeps
+  // its rows (never deleted) — the app-side entry remains a history row.
+  const r3 = await call("replace");
+  const afterReplace = fs.readFileSync(arch, "utf8");
+  const hist = await history();
+  const cccRow = hist.find((h) => h.vid === C);
+  // default mode (no arg) = merge; re-import of the same file adds nothing
+  const r4 = await call();
+  details.push(`replace: archiveAdded=${r3.archiveAdded}; default-mode: imported=${r4.idsImported} added=${r4.archiveAdded}`);
+  const s = await evalAsync(ws, `window.__e2e.ipc('settings_get')`);
+  details.push(`settings.archivePath=${JSON.stringify(s.archivePath)}`);
+  fs.rmSync(picked, { force: true });
+  record(23, "archive import merge/replace (d75)",
+    r1.archiveAdded === 2 && afterMerge.includes(`e2esrc ${A}`) &&
+      r2.archiveAdded === 0 && afterMerge2.includes(`e2eapp ${C}`) && pickedUntouched &&
+      r3.archiveAdded === 2 && afterReplace.includes(`e2esrc ${A}`) && !afterReplace.includes(`e2eapp ${C}`) &&
+      !!cccRow &&
+      r4.idsImported === 0 && r4.archiveAdded === 0 &&
+      (s.archivePath == null || s.archivePath === ""),
+    details);
+};
+
 const SCEN_NAMES = {
   1: "single video end-to-end",
   2: "entire playlist counter",
@@ -1488,6 +1540,7 @@ const SCEN_NAMES = {
   20: "archived duplicate skips (no youtube)",
   21: "archive↔db reconciliation (D64)",
   22: "reset app data (D69)",
+  23: "archive import merge/replace (D75)",
 };
 
 function writeResultsDoc() {

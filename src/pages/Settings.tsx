@@ -35,7 +35,8 @@ export default function SettingsPage() {
           )}
           <label></label>
           <div className="hint">
-            update = download latest build (~90 mb), verify sha-256, swap atomically. never automatic.
+            checking and updating are manual — updates download and install
+            in-app, nothing runs on its own.
           </div>
           <label>app updates</label>
           <AppUpdateRow />
@@ -84,17 +85,16 @@ export default function SettingsPage() {
             <span className="hint">2 recommended</span>
           </div>
           <label>archive file</label>
-          <div className="row flex items-center gap-2">
-            <input
-              type="text"
-              className="grow"
-              value={settings.archivePath ?? ""}
-              placeholder="%APPDATA%\ytdlp-gui\downloaded.txt"
-              onChange={(e) => void update({ archivePath: e.target.value })}
-            />
+          <div className="row flex items-center gap-2 min-w-0">
+            <span className="hint grow" style={{ overflowWrap: "anywhere" }}>
+              managed by the app — import/export it from the history page
+            </span>
           </div>
           <label></label>
-          <div className="warn">⚠ editing downloaded.txt changes what counts as already downloaded</div>
+          <div className="hint">
+            the archive records what's already been downloaded, so re-queuing
+            skips it. import or export it from history → footer.
+          </div>
         </div>
       </div>
 
@@ -102,18 +102,26 @@ export default function SettingsPage() {
         <div className="card-h">
           <h2>app</h2>
         </div>
-        <div className="card-b fgrid">
-          <label>version</label>
-          <VersionRow />
-          <div className="row flex items-center gap-2">
-            <span className="hint">ytdlp-gui · windows x64</span>
+        {/* d77: clean label/value rows — the old fgrid let a free-standing
+            hint div land in the label column and misalign the card. */}
+        <div className="card-b">
+          <div className="app-row">
+            <span className="app-key">version</span>
+            <span className="row flex items-center gap-2">
+              <VersionRow />
+              <span className="hint">ytdlp-gui · windows x64</span>
+            </span>
           </div>
-          <label>license</label>
-          <div className="row flex items-center">
+          <div className="app-row">
+            <span className="app-key">license</span>
             <span className="hint">unlicense — do whatever</span>
           </div>
-          <label>reset</label>
-          <ResetRow />
+          <div className="app-row" style={{ alignItems: "flex-start" }}>
+            <span className="app-key" style={{ paddingTop: 2 }}>
+              reset
+            </span>
+            <ResetRow />
+          </div>
         </div>
       </div>
     </div>
@@ -154,8 +162,7 @@ function ResetRow() {
     return (
       <div className="hint">
         reset done — {report.jobsCleared} queued, {report.historyCleared} history,
-        settings{report.archiveRemoved ? ", downloaded.txt" : ""}
-        {report.archiveWasCustom ? " (custom archive kept)" : ""} removed. binaries kept.
+        settings{report.archiveRemoved ? ", archive" : ""} removed. binaries kept.
       </div>
     );
   }
@@ -175,10 +182,9 @@ function ResetRow() {
   return (
     <div className="row flex flex-col gap-1">
       <div className="warn">
-        ⚠ permanently deletes the queue, history, settings and downloaded.txt
-        (the download archive — re-downloading already-fetched items will
-        re-fetch them). managed yt-dlp/ffmpeg in bin/ are kept. a custom
-        archive path is never touched.
+        ⚠ permanently deletes the queue, history, settings and the download
+        archive (app-data\downloaded.txt — re-downloading already-fetched
+        items will re-fetch them). managed yt-dlp/ffmpeg in bin/ are kept.
       </div>
       <div className="row flex items-center gap-2">
         <button className="btn sm" disabled={busy} onClick={() => setArmed(false)}>

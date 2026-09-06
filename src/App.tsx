@@ -51,21 +51,33 @@ export default function App() {
     };
   }, [loadSettings, loadQueue]);
 
-  // §6 keyboard polish: ctrl+v focuses the composer from anywhere
+  // §6 keyboard polish: ctrl+v focuses the composer from anywhere —
+  // EXCEPT when the keystroke lands in a text field (d80): the global
+  // shortcut hijacked pastes into the history search box (and any other
+  // input), teleporting the user to home instead of pasting. when the
+  // target is already editable, the paste must simply paste.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.key === "v") {
-        useUi.getState().setPage("home");
-        // the composer mounts *after* the page switch re-renders — focusing
-        // synchronously grabs nothing (found by the e2e checklist, S14).
-        // two frames: one for the react commit, one for effects to settle.
-        requestAnimationFrame(() =>
-          requestAnimationFrame(() => {
-            const el = document.querySelector<HTMLTextAreaElement>(".card-b textarea");
-            el?.focus();
-          }),
-        );
-      }
+      if (!(e.ctrlKey || e.metaKey) || e.key !== "v") return;
+      const target = e.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.isContentEditable ||
+          target.closest("input, textarea, [contenteditable]"))
+      )
+        return;
+      useUi.getState().setPage("home");
+      // the composer mounts *after* the page switch re-renders — focusing
+      // synchronously grabs nothing (found by the e2e checklist, S14).
+      // two frames: one for the react commit, one for effects to settle.
+      requestAnimationFrame(() =>
+        requestAnimationFrame(() => {
+          const el = document.querySelector<HTMLTextAreaElement>(".card-b textarea");
+          el?.focus();
+        }),
+      );
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -74,7 +86,7 @@ export default function App() {
   return (
     <div className="app h-full flex flex-col">
       <TabBar />
-      <main className="flex-1 min-h-0 overflow-y-auto">
+      <main className="scrollpane flex-1 min-h-0 overflow-y-auto">
         {page === "home" && <HomePage />}
         {page === "history" && <HistoryPage />}
         {page === "settings" && <SettingsPage />}

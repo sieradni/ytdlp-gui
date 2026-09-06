@@ -16,7 +16,7 @@ use crate::engine::args::{build_download_argv, JobOptions, PlaylistMode};
 use crate::engine::parser::{parse_line, ParsedLine};
 use crate::engine::process;
 use crate::error::{other, AppResult};
-use crate::store::{archive_append, archive_contains, archive_path_from_settings, Db, JobRow};
+use crate::store::{archive_append, archive_contains, default_archive_path, Db, JobRow};
 
 /// directory holding the app-managed ffmpeg (§4). passed to yt-dlp via
 /// `--ffmpeg-location` — the managed copy is not on PATH.
@@ -541,7 +541,7 @@ impl JobQueue {
             let is_playlist = identity.as_ref().is_some_and(|i| i.is_playlist);
             if !is_playlist && opts.skip_downloaded {
                 let (ex, vid) = key.split_once(' ').expect("identity key shape");
-                let arch = archive_path_from_settings();
+                let arch = default_archive_path();
                 if archive_contains(&arch, ex, vid) {
                     self.push_log(&id, "already downloaded — skipping (archive)".into());
                     let mut row = self.row(&id);
@@ -579,7 +579,7 @@ impl JobQueue {
         // a playlist job yt-dlp itself skips ids the archive already holds
         // (D41 — a half-downloaded playlist resumes where it left off).
         let archive_flag: Option<String> = if opts.skip_downloaded {
-            Some(archive_path_from_settings().to_string_lossy().into_owned())
+            Some(default_archive_path().to_string_lossy().into_owned())
         } else {
             None
         };
@@ -662,7 +662,7 @@ impl JobQueue {
                 // every item.
                 if let (Some(key), false) = (&identity_key, is_playlist) {
                     if let Some((ex, vid)) = key.split_once(' ') {
-                        if let Err(e) = archive_append(&archive_path_from_settings(), ex, vid) {
+                        if let Err(e) = archive_append(&default_archive_path(), ex, vid) {
                             self.push_log(&id, format!("archive write failed: {e}"));
                         }
                         // history metadata write (§5.3). d45: duration/size

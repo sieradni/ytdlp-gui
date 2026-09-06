@@ -1,8 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { confirmDialog } from "../components/ConfirmDialog";
+import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
+import { choiceDialog, confirmDialog } from "../components/ConfirmDialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
+  appPaths,
+  archiveExport,
+  archiveReconcile,
   e2eArtifactsRemove,
   e2eArtifactsReport,
   fileExists,
@@ -150,7 +153,7 @@ export default function HistoryPage() {
   };
 
   return (
-    <div className="mx-auto max-w-[860px] px-5 pt-4 pb-9">
+    <div className="page mx-auto max-w-[860px] px-5 pt-4 pb-9">
       {artifacts && (
         <div className="card" style={{ borderColor: "var(--amber, #b8860b)" }}>
           <div className="card-h">
@@ -197,8 +200,10 @@ export default function HistoryPage() {
             </button>
           </div>
         </div>
-        <div style={{ overflowX: "auto" }}>
-          <table>
+        {/* d76: bounded like the queue table — the page (and its footer
+            buttons) stay reachable on a 2k-entry history; the header sticks. */}
+        <div className="hist-scroll">
+          <table className="hist-table">
             <colgroup>
               <col />
               <col style={{ width: 130 }} />
@@ -278,60 +283,99 @@ export default function HistoryPage() {
             </tbody>
           </table>
         </div>
+        {/* d76: the action bar lives OUTSIDE the scroll region — always visible. */}
         <div
-          className="card-b flex items-center flex-wrap"
+          className="card-b flex items-center flex-wrap gap-2"
           style={{ borderTop: "1px solid var(--border)" }}
         >
           <span className="hint">{rows.length} entries</span>
           <span className="grow" />
-          {importMsg && <span className="hint">{importMsg}</span>}
+          {importMsg && <span className="hint hist-msg">{importMsg}</span>}
+          <button className="btn sm ghost" onClick={() => void importArchive()}>
+            import archive…
+          </button>
+          <button
+            className="btn sm ghost"
+            onClick={() => void exportArchive()}
+            title="copy the app's archive to a file of your choosing — for backups or other tools"
+          >
+            export archive…
+          </button>
+          <button
+            className="btn sm ghost"
+            onClick={() => void reconcile()}
+            title="adds history rows for archive entries the db doesn't know (d64) — never removes anything. needed only after hand-editing the archive file."
+          >
+            sync history from archive
+          </button>
           <button
             className="btn sm ghost"
             onClick={async () => {
-              const { appPaths } = await import("../lib/ipc");
               const p = await appPaths();
               await revealItemInDir(p.archivePath);
             }}
+            title="reveal the app's own downloaded.txt in explorer"
           >
-            open archive
+            reveal archive
           </button>
-          <button
-            className="btn sm ghost"
-            onClick={async () => {
-              const { archiveReconcile } = await import("../lib/ipc");
-              const r = await archiveReconcile();
-              setImportMsg(
-                r.rowsBackfilled > 0
-                  ? `reconciled: ${r.rowsBackfilled} archive ids added to history (${r.idsInArchive} in archive)`
-                  : `archive reconciled — ${r.idsInArchive} ids, nothing to backfill`,
-              );
-              await load(query || undefined);
-            }}
-            title="add history rows for archive ids the db doesn't know (d64) — never removes anything"
-          >
-            reconcile archive
-          </button>
-          <button
-            className="btn sm ghost"
-            onClick={async () => {
-              const picked = await openDialog({
-                multiple: false,
-                filters: [{ name: "downloaded.txt", extensions: ["txt"] }],
-              });
-              if (typeof picked === "string") {
-                const res = await historyImportArchive(picked);
-                setImportMsg(`imported ${res.idsImported} ids — archive: ${res.archivePath}`);
-                await load(query || undefined);
-              }
-            }}
-          >
-            import archive…
-          </button>
-          <span className="hint" style={{ width: "100%" }}>
-            ⚠ editing downloaded.txt changes what counts as already downloaded
-          </span>
         </div>
       </div>
     </div>
   );
+
+  async function importArchive() {
+    const picked = await openDialog({
+      multiple: false,
+      filters: [{ name: "downloaded.txt", extensions: ["txt"] }],
+    });
+    if (typeof picked !== "string") return;
+    // d75: the app copies the file into its own archive — the user picks
+    // what that means. the picked file itself is never modified.
+    const mode = await choiceDialog({
+      title: "import archive",
+      body: `“${picked.split(/[\\/]/).pop()}” will be copied into the app's own archive (${(await appPaths()).archivePath}). your file is not modified.`,
+      options: [
+        {
+          value: "merge",
+          label: "merge — keep everything",
+          description: "the app archive keeps all its entries and gains the ones it's missing",
+          primary: true,
+        },
+        {
+          value: "replace",
+          label: "replace — use this file's contents",
+          description:
+            "the app archive is emptied of its current entries and takes this file's instead",
+        },
+      ],
+      cancelLabel: "cancel",
+    });
+    if (mode == null) return;
+    const res = await historyImportArchive(picked, mode as "merge" | "replace");
+    setImportMsg(
+      `${res.idsImported === 0 ? "no new" : res.idsImported} entries added to history · archive: ${res.archiveAdded} ${mode === "replace" ? "entries" : "new entries"}`,
+    );
+    await load(query || undefined);
+  }
+
+  async function exportArchive() {
+    const picked = await saveDialog({
+      title: "export archive as…",
+      defaultPath: "downloaded.txt",
+      filters: [{ name: "downloaded.txt", extensions: ["txt"] }],
+    });
+    if (typeof picked !== "string") return;
+    const n = await archiveExport(picked);
+    setImportMsg(`exported ${n} entries → ${picked}`);
+  }
+
+  async function reconcile() {
+    const r = await archiveReconcile();
+    setImportMsg(
+      r.rowsBackfilled > 0
+        ? `synced: ${r.rowsBackfilled} archive entries added to history (${r.idsInArchive} in archive)`
+        : `history is up to date — ${r.idsInArchive} archive entries known`,
+    );
+    await load(query || undefined);
+  }
 }

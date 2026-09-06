@@ -244,26 +244,21 @@ impl Db {
     /// (`<extractor> <id>` lines). returns the number of ids imported.
     pub fn seed_history_from_archive(&self, text: &str) -> AppResult<usize> {
         let now = now_unix();
-        let mut n = 0;
         let conn = self.conn();
-        for line in text.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            let Some((extractor, vid)) = line.split_once(' ') else {
-                continue;
-            };
-            let (extractor, vid) = (extractor.trim(), vid.trim());
-            if extractor.is_empty() || vid.is_empty() {
-                continue;
-            }
-            conn.execute(
+        // one transaction for the whole import: per-row autocommit fsyncs
+        // made a 2k-entry import take ~10 s (user-reported, 2026-09-06);
+        // transactional it is single-digit milliseconds. returns rows that
+        // were actually NEW (changes() after INSERT OR IGNORE), so the ui
+        // can say "12 new" instead of a meaningless line count.
+        let tx = conn.unchecked_transaction()?;
+        let mut n = 0usize;
+        for (extractor, vid) in parse_archive_lines(text) {
+            n += tx.execute(
                 "INSERT OR IGNORE INTO history (extractor, vid, downloaded_at) VALUES (?1,?2,?3)",
                 rusqlite::params![extractor, vid, now],
             )?;
-            n += 1;
         }
+        tx.commit()?;
         Ok(n)
     }
 
@@ -274,33 +269,17 @@ impl Db {
     pub fn backfill_history_from_archive(&self, text: &str) -> AppResult<usize> {
         let now = now_unix();
         let conn = self.conn();
-        let mut added = 0;
-        for line in text.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            let Some((extractor, vid)) = line.split_once(' ') else {
-                continue;
-            };
-            let (extractor, vid) = (extractor.trim(), vid.trim());
-            if extractor.is_empty() || vid.is_empty() {
-                continue;
-            }
-            let present: i64 = conn.query_row(
-                "SELECT COUNT(*) FROM history WHERE extractor=?1 AND vid=?2",
-                rusqlite::params![extractor, vid],
-                |r| r.get(0),
-            )?;
-            if present > 0 {
-                continue;
-            }
-            conn.execute(
-                "INSERT INTO history (extractor, vid, downloaded_at) VALUES (?1,?2,?3)",
+        // same transactional shape as seed_history_from_archive — reconcile
+        // over a large hand-edited archive gets the same speedup.
+        let tx = conn.unchecked_transaction()?;
+        let mut added = 0usize;
+        for (extractor, vid) in parse_archive_lines(text) {
+            added += tx.execute(
+                "INSERT OR IGNORE INTO history (extractor, vid, downloaded_at) VALUES (?1,?2,?3)",
                 rusqlite::params![extractor, vid, now],
             )?;
-            added += 1;
         }
+        tx.commit()?;
         Ok(added)
     }
 
@@ -434,25 +413,71 @@ pub fn archive_append(archive_path: &Path, extractor: &str, vid: &str) -> AppRes
     Ok(())
 }
 
+/// parse downloaded.txt lines into valid (extractor, vid) pairs. shared by
+/// seed/backfill/import/reconcile so every consumer agrees on what counts
+/// as an entry: non-empty, not a comment, two non-empty space-split parts.
+fn parse_archive_lines(text: &str) -> impl Iterator<Item = (String, String)> + '_ {
+    text.lines().filter_map(|line| {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            return None;
+        }
+        let (a, b) = line.split_once(' ')?;
+        let (a, b) = (a.trim(), b.trim());
+        (!a.is_empty() && !b.is_empty()).then(|| (a.to_owned(), b.to_owned()))
+    })
+}
+
+/// d75: the app-owned archive is the single source of truth (settings can no
+/// longer point the engine at an arbitrary user file). `merge_into_archive`
+/// is the union primitive behind import-merge and the one-time custom-path
+/// migration: existing lines are kept, lines from `text` that the archive
+/// is missing are appended, de-duplicated. no sorting — download.txt order
+/// is append-order and nothing consumes ordering. writes are atomic
+/// (tmp+rename, same pattern as settings.json).
+pub fn merge_into_archive(path: &std::path::Path, text: &str) -> AppResult<usize> {
+    use std::collections::HashSet;
+    let existing = std::fs::read_to_string(path).unwrap_or_default();
+    let mut seen: HashSet<(String, String)> = parse_archive_lines(&existing).collect();
+    let mut out = String::new();
+    // preserve the archive's own lines verbatim (they may carry comments);
+    // only guarantee the trailing newline before appends.
+    out.push_str(&existing);
+    if !existing.is_empty() && !existing.ends_with('\n') {
+        out.push('\n');
+    }
+    let mut added = 0usize;
+    for pair in parse_archive_lines(text) {
+        if seen.insert(pair.clone()) {
+            out.push_str(&pair.0);
+            out.push(' ');
+            out.push_str(&pair.1);
+            out.push('\n');
+            added += 1;
+        }
+    }
+    if added == 0 {
+        return Ok(0); // nothing new — don't touch the file at all
+    }
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let tmp = path.with_extension("txt.tmp");
+    std::fs::write(&tmp, out)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(added)
+}
+
+/// count parseable archive entries (the reconcile report's `ids_in_archive`).
+pub fn count_archive_ids(path: &std::path::Path) -> u64 {
+    std::fs::read_to_string(path)
+        .map(|t| parse_archive_lines(&t).count() as u64)
+        .unwrap_or(0)
+}
+
 /// default archive location (§4 layout): app-data\downloaded.txt.
 pub fn default_archive_path() -> std::path::PathBuf {
     crate::binaries::manager::app_data_dir().join("downloaded.txt")
-}
-
-pub fn archive_path_from_settings() -> std::path::PathBuf {
-    crate::settings::load()
-        .archive_path
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(default_archive_path)
-}
-
-/// same, from an in-memory settings value (for callers already holding the
-/// handle's snapshot — avoids a second disk read mid-command).
-pub fn archive_path_from_settings_with(s: &crate::settings::Settings) -> std::path::PathBuf {
-    s.archive_path
-        .clone()
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(default_archive_path)
 }
 
 #[cfg(test)]
@@ -648,6 +673,49 @@ mod tests {
         // malformed lines (no space) never match
         std::fs::write(&p, "garbage\n").unwrap();
         assert!(!archive_contains(&p, "garbage", ""));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn merge_into_archive_is_union_and_counts_added_d75() {
+        let dir = std::env::temp_dir().join(format!("yg-arch-mrg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("downloaded.txt");
+        std::fs::write(&p, "# kept comments survive\nyoutube aaa\nvimeo bbb\n").unwrap();
+
+        // import overlaps (youtube aaa) + adds two new ids
+        let n = merge_into_archive(&p, "youtube aaa\ntiktok ccc\n# note\nyoutube ddd\n").unwrap();
+        assert_eq!(n, 2);
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(text.contains("# kept comments survive"));
+        for id in ["youtube aaa", "vimeo bbb", "tiktok ccc", "youtube ddd"] {
+            assert!(text.contains(id));
+        }
+        assert_eq!(text.lines().filter(|l| !l.starts_with('#')).count(), 4);
+
+        // idempotent: same import again adds nothing and rewrites nothing
+        let before = std::fs::read_to_string(&p).unwrap();
+        assert_eq!(merge_into_archive(&p, "youtube aaa\n").unwrap(), 0);
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), before);
+
+        // merge into a missing file creates it (import on a fresh profile)
+        let q = dir.join("fresh.txt");
+        assert_eq!(merge_into_archive(&q, "youtube xxx\n").unwrap(), 1);
+        assert_eq!(std::fs::read_to_string(&q).unwrap(), "youtube xxx\n");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn count_archive_ids_counts_parseable_entries_d75() {
+        let dir = std::env::temp_dir().join(format!("yg-arch-cnt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("downloaded.txt");
+        std::fs::write(&p, "youtube a\n# c\nnotapair\nvimeo b\n\n").unwrap();
+        assert_eq!(count_archive_ids(&p), 2);
+        assert_eq!(count_archive_ids(&dir.join("missing.txt")), 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

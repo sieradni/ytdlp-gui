@@ -127,7 +127,7 @@ pub async fn overwrite_targets(
         // is safe (no download, no postprocessors) — no dialog needed
         if skip_downloaded
             && archive_contains(
-                &crate::store::archive_path_from_settings(),
+                &crate::store::default_archive_path(),
                 &identity.extractor,
                 &identity.id,
             )

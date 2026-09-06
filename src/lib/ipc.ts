@@ -74,6 +74,9 @@ export interface Settings {
   wizardDismissed: boolean;
   destination: string | null;
   concurrency: number | null;
+  /** d75: retired — the app owns its archive (app-data\downloaded.txt).
+   * kept in the type so older settings.json round-trips without error;
+   * the backend one-time-merges any legacy value and clears it. */
   archivePath: string | null;
   /** one-shot v1 migration marker (D55) — must round-trip through saves */
   migratedFromV1: boolean;
@@ -225,11 +228,15 @@ export interface HistoryRow {
 
 export const historyList = (filter?: string) =>
   invoke<HistoryRow[]>("history_list", { filter: filter ?? null });
-export const historyImportArchive = (path: string, copy?: boolean) =>
-  invoke<{ idsImported: number; archivePath: string }>("history_import_archive", {
-    path,
-    copy: copy ?? null,
-  });
+/** d75 import semantics: merge = union with the app archive (default),
+ * replace = the app archive takes the imported file's contents (history
+ * rows are never deleted). */
+export type ArchiveImportMode = "merge" | "replace";
+export const historyImportArchive = (path: string, mode: ArchiveImportMode = "merge") =>
+  invoke<{ idsImported: number; archiveAdded: number; archivePath: string }>(
+    "history_import_archive",
+    { path, mode },
+  );
 export const historyRelink = (id: string, path: string | null) =>
   invoke<void>("history_relink", { id, path });
 
@@ -243,11 +250,17 @@ export interface ReconcileReport {
 export const archiveReconcile = () =>
   invoke<ReconcileReport>("archive_reconcile");
 
+/** d75: copy the app-owned archive to a user-chosen path. returns the
+ * number of entries exported. */
+export const archiveExport = (dest: string) =>
+  invoke<number>("archive_export", { dest });
+
 // ---------------------------------------------------------------------------
 // app paths + version (§7)
 // ---------------------------------------------------------------------------
 
 export interface AppPaths {
+  /** the app-owned archive — app-data\downloaded.txt (D75: the only one) */
   archivePath: string;
   binDir: string;
 }
