@@ -15,7 +15,7 @@
 
 /** ease factor per frame — the demo knob (higher = snappier).
  * 0.10 ≈ 0.6 s glide per notch; 0.16 felt instant to the first demoer. */
-const EASE = 0.1;
+const EASE = 0.16;
 
 export function attachSmoothScroll(): () => void {
   // deliberately NOT gated on prefers-reduced-motion (d82): the demo
