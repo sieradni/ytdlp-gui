@@ -7,6 +7,7 @@ import HomePage from "./pages/Home";
 import HistoryPage from "./pages/History";
 import SettingsPage from "./pages/Settings";
 import { attachAppUpdatePolling } from "./lib/appUpdate";
+import { attachSmoothScroll } from "./lib/smoothScroll";
 import { useUi } from "./stores/ui";
 import { useBinaries } from "./stores/binaries";
 import { useSettings } from "./stores/settings";
@@ -19,8 +20,12 @@ export default function App() {
   const loadQueue = useQueue((s) => s.load);
   const [queueError, setQueueError] = useState<string | null>(null);
 
-  // m5 bootstrap: app-update polling (launch + 6 h, §8)
+  // m5 bootstrap: app-update polling (launch-only since D81, §8)
   useEffect(() => attachAppUpdatePolling(), []);
+
+  // d82: wheel smoothing — makes long-list positioning legible. demo
+  // knob: EASE in smoothScroll.ts (0.16 = quick attack, short glide).
+  useEffect(() => attachSmoothScroll(), []);
 
   // m2/m3 bootstrap: settings, binary status + wizard gate, queue mirror,
   // event subscriptions. no ipc probe display — the engine status is real now.
