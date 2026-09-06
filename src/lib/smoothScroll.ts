@@ -13,11 +13,17 @@
  * instead of fighting the user.
  */
 
-/** ease factor per frame — the demo knob (higher = snappier) */
-const EASE = 0.16;
+/** ease factor per frame — the demo knob (higher = snappier).
+ * 0.10 ≈ 0.6 s glide per notch; 0.16 felt instant to the first demoer. */
+const EASE = 0.1;
 
 export function attachSmoothScroll(): () => void {
-  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return () => {};
+  // deliberately NOT gated on prefers-reduced-motion (d82): the demo
+  // machine reports reduce (windows "animation effects" off) and the user
+  // explicitly asked for smoothing — an os flag that also mutes the dialog
+  // chime should not silently disable a core interaction feel. scroll
+  // smoothing is controlled by the user in-app; decorative fades/chime
+  // keep honoring the os flag.
 
   const anim = { el: null as HTMLElement | null, target: 0, lastSet: 0, raf: 0 };
 
