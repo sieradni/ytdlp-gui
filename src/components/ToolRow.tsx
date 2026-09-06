@@ -115,7 +115,13 @@ export default function ToolRow({ status }: { status: ToolStatus }) {
             custom…
           </button>
         </div>
-        {msg && <div className="toolrow-msg hint">{msg}</div>}
+        <div className="toolrow-msg hint">
+          {msg
+            ? msg
+            : status.lastChecked
+              ? `last checked ${new Date(status.lastChecked * 1000).toLocaleString()}${status.latestTag ? ` · latest: ${status.latestTag}` : ""}`
+              : "never checked"}
+        </div>
       </div>
     </>
   );

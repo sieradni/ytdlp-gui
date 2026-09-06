@@ -497,9 +497,11 @@ impl JobQueue {
                 // finalize() pushes the message into the job's log buffer, so
                 // the expando carries the reason once the frontend pulls
                 // queue_list (the store reloads on terminal job:update —
-                // found by the e2e checklist, S12).
-                self.finalize(&id, JobState::Error, Some(e.to_string()))
-                    .await;
+                // found by the e2e checklist, S12). fetch-phase errors get
+                // the same rewrites as run-phase errors (the cookie decrypt
+                // failure surfaces HERE, during the identity probe).
+                let msg = rewrite_cookie_error(&rewrite_botgate_error(&e.to_string()));
+                self.finalize(&id, JobState::Error, Some(msg)).await;
                 self.cleanup_running(&id, &url, None);
                 return;
             }
@@ -614,7 +616,9 @@ impl JobQueue {
                 .await;
             }
             RunOutcome::Error(msg) => {
-                let msg = rewrite_botgate_error(&rewrite_skip_existing_error(&msg));
+                let msg = rewrite_cookie_error(&rewrite_botgate_error(
+                    &rewrite_skip_existing_error(&msg),
+                ));
                 self.finalize(&id, JobState::Error, Some(msg)).await;
             }
             RunOutcome::Done {
@@ -1297,6 +1301,25 @@ fn rewrite_botgate_error(msg: &str) -> String {
     }
 }
 
+/// m7 close-out: browser-cookie decryption failures are the single most
+/// likely dead end after a bot-gate (chrome ≥127 app-bound encryption on
+/// windows cannot be decrypted by yt-dlp). live-verified message on this
+/// machine: "ERROR: Failed to decrypt with DPAPI. See <yt-dlp issue 10927>".
+/// rewrite it into the actual guidance instead of a crypto error.
+fn rewrite_cookie_error(msg: &str) -> String {
+    let lower = msg.to_lowercase();
+    if lower.contains("failed to decrypt with dpapi")
+        || lower.contains("failed to decrypt cookie")
+        || (lower.contains("cookies") && lower.contains("could not be decrypted"))
+    {
+        format!(
+            "{msg} — this browser's cookie store could not be decrypted (chrome ≥127 encrypts them in a way yt-dlp cannot read). use firefox or edge as the cookie source (composer → advanced → cookies), or export a cookies.txt file"
+        )
+    } else {
+        msg.to_owned()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1322,6 +1345,22 @@ mod tests {
         // non-auth errors stay untouched
         let other = "ERROR: [generic] x: Unable to download webpage";
         assert_eq!(rewrite_botgate_error(other), other);
+    }
+
+    #[test]
+    fn cookie_decrypt_rewrite_matches_the_live_dpapi_message() {
+        // verbatim from a real run against chrome ≥127 on this machine
+        // (2026-09): the app-bound encryption failure yt-dlp cannot bypass.
+        let real = "ERROR: Failed to decrypt with DPAPI. See  https://github.com/yt-dlp/yt-dlp/issues/10927  for more info";
+        let out = rewrite_cookie_error(real);
+        assert!(out.starts_with(real));
+        assert!(out.contains("firefox or edge"));
+        // the yt-dlp in-decryption warning variant matches too
+        let warn = "ERROR: failed to decrypt cookie (AES-GCM) because the MAC check failed. Possibly the key is wrong?";
+        assert!(rewrite_cookie_error(warn).contains("firefox or edge"));
+        // unrelated errors stay untouched
+        let other = "ERROR: [generic] x: Unable to download webpage";
+        assert_eq!(rewrite_cookie_error(other), other);
     }
 
     #[test]

@@ -449,6 +449,9 @@ pub struct ToolStatus {
     pub update_available: bool,
     pub latest_tag: Option<String>,
     pub staged: bool,
+    /// unix seconds of the last release check (D42; C6 surfaces it in the
+    /// tools card so "when did I last check?" has an answer).
+    pub last_checked: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -495,6 +498,7 @@ pub fn status(m: &Manifest) -> BinaryManifest {
             update_available: false,
             latest_tag: entry.and_then(|e| e.latest_tag.clone()),
             staged: entry.map(|e| e.staged).unwrap_or(false),
+            last_checked: entry.and_then(|e| e.last_checked),
         }
     };
 

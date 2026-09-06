@@ -33,6 +33,8 @@ export interface ToolStatus {
   updateAvailable: boolean;
   latestTag: string | null;
   staged: boolean;
+  /** unix seconds of the last release check (D42) */
+  lastChecked: number | null;
 }
 
 export interface BinaryManifest {
