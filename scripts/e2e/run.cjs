@@ -958,6 +958,7 @@ S[16] = async () => {
   await waitFor(ws, "document.querySelectorAll('.tab-btn').length >= 3 && window.__TAURI_INTERNALS__ ? true : null", { timeoutMs: 60000, everyMs: 400 });
   await sleep(1500);
   await injectBundle();
+  await ws.call("Runtime.enable").catch(() => {}); // console events for the log
   await sleep(800);
   await injectBundle();
   const after = await jobs();
@@ -987,17 +988,14 @@ S[16] = async () => {
 // job with options.overwrite=true that redownloads cleanly (the ungated
 // legacy behavior errored: skip-then-embed-metadata over a cover-tagged opus
 // → "Postprocessing: Conversion failed!", 0-byte .temp, e2e-reproduced).
-// uses bandcamp (youtube is bot-gated under e2e load); the native dialog is
-// intercepted at __TAURI_INTERNALS__.invoke so module instances don't matter.
+// uses bandcamp (youtube is bot-gated under e2e load); the gate is the
+// app-owned confirm modal (D70) — answered by DOM click on its buttons.
 S[18] = async () => {
   const details = [];
   const URL_ = "https://tycho.bandcamp.com/track/a-walk";
-  // the gate opens the REAL native dialog (rfd task dialog, titled
-  // "file already exists", custom buttons "overwrite"/"cancel"). task
-  // dialogs have no default button (Enter is inert) and rfd adds no
-  // mnemonics, so keyboard automation is unreliable — UI Automation invokes
-  // each button BY NAME instead (position-independent, no interception of
-  // the webview needed).
+  // the gate opens the in-app confirm modal ("file already exists",
+  // buttons "overwrite"/"cancel") — answerDialog clicks it by
+  // data-dialog-action and resolves from the dialog's own ground truth.
   // composer: audio/mp3, skip OFF (a-walk is archived by earlier scenarios)
   await setOpts({ dlType: "audio", audioFormat: "mp3", skipDownloaded: false });
   details.push("mirror: audio/mp3, skip off");
@@ -1021,26 +1019,27 @@ S[18] = async () => {
   if (!fs.existsSync(target)) throw new Error(`initial file missing: ${target}`);
   const mtime0 = fs.statSync(target).mtimeMs;
   details.push(`initial download: ${path.basename(target)}`);
+  // layer probe: does a DIRECT confirmDialog call (fresh import) render the
+  // modal inside the harness page? separates "host/mount broken" from
+  // "the page's module instance broken".
   const clickRedl = async () => {
     await evalUntil(`(() => { window.__e2e.goto('history'); return document.querySelector('.tab-btn.active')?.textContent.trim() === 'history' ? 'ok' : 'pending'; })()`, { timeoutMs: 8000, label: "history active (s18)" });
     return evalUntil(`(() => { const r = [...document.querySelectorAll('.card table tbody tr')].find(x => x.textContent.includes('A Walk')); if (!r) return 'pending'; const b = [...r.querySelectorAll('button')].find(b => (b.title ?? '').startsWith('download again')); if (!b) return 'pending'; b.click(); return 'ok'; })()`, { timeoutMs: 12000, everyMs: 300, label: "↻ click (s18)" });
   };
-  // step 2a: cancel — the native dialog must fire, be answered 'cancel',
+  // step 2a: cancel — the confirm modal must fire, be answered 'cancel',
   // queue nothing, and render the cancel hint (the hint is the POSITIVE
   // signal the gate actually executed: it renders only after ask() returned
   // false, so a never-fired gate fails here too)
-  await clickRedl();
-  const ansA = answerDialog("cancel");
+  const ansA = await answerDialog("cancel", clickRedl);
   const hint = await evalUntil(`(() => [...document.querySelectorAll('.hint')].some(h => h.textContent.includes('re-download cancelled')) ? 'ok' : 'pending')()`, { timeoutMs: 8000, everyMs: 300, label: "cancel hint (s18)" }).catch(() => "timeout");
   await sleep(800);
   let after = await jobs();
   const newAfterCancel = after.filter((j) => !prior.has(j.id));
   details.push(`cancel: dialog=${ansA}, hint=${hint === "ok"}, jobs queued=${newAfterCancel.length}`);
-  const cancelOk = ansA.startsWith("clicked") && hint === "ok" && newAfterCancel.length === 0;
+  const cancelOk = (ansA === "resolved-ok" || ansA === "gone") && hint === "ok" && newAfterCancel.length === 0;
   prior = new Set(after.map((j) => j.id));
   // step 2b: grant — new job with overwrite=true finishing clean
-  await clickRedl();
-  const ansB = answerDialog("overwrite");
+  const ansB = await answerDialog("overwrite", clickRedl);
   details.push(`grant: dialog=${ansB}`);
   let j2 = null;
   for (let i = 0; i < 90; i++) {
@@ -1055,7 +1054,7 @@ S[18] = async () => {
     const stuckState = stuck.filter((j) => !prior.has(j.id)).map((j) => `${j.id.slice(-6)}:${j.state}:${(j.error ?? "").slice(0, 40)}`).join(", ") || "no new jobs";
     let probe = "probe-fail";
     try {
-      probe = require("child_process").execFileSync("powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(__dirname, "answer-dialog.ps1"), "-Title", "file already exists", "-Name", "overwrite", "-TimeoutMs", "3000", "-Probe"], { encoding: "utf8", timeout: 15000 }).trim();
+      probe = await evalAsync(ws, `(() => { const d = document.querySelector('[data-testid="confirm-dialog"]'); return d ? 'modal-visible: ' + d.querySelector('.cdlg-title')?.textContent?.trim() : 'no modal in dom'; })()`);
     } catch { }
     details.push(`TIMEOUT: new jobs=[${stuckState}], dialog ${probe}`);
     record(18, "re-download overwrite gate (D59)", false, details);
@@ -1074,30 +1073,67 @@ S[18] = async () => {
   } catch { ow = "db-err"; }
   const mtime1 = fs.existsSync(target) ? fs.statSync(target).mtimeMs : 0;
   details.push(`options.overwrite=${ow}; file_exists ipc=${existsIpc}; file re-downloaded (mtime advanced): ${mtime1 > mtime0}`);
-  record(18, "re-download overwrite gate (D59)", !!(cancelOk && ansB.startsWith("clicked") && j2.state === "done" && !(j2.error ?? "") && ow === "true" && existsIpc === true && mtime1 > mtime0), details);
+  record(18, "re-download overwrite gate (D59)", !!(cancelOk && ansB === "resolved-ok" && j2.state === "done" && !(j2.error ?? "") && ow === "true" && existsIpc === true && mtime1 > mtime0), details);
 };
 
 // ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
 
-/** drive the real native rfd task dialog (title "file already exists", custom
- * buttons "overwrite"/"cancel") by NAME over UI Automation — task dialogs
- * have no default button (Enter is inert) and rfd adds no mnemonics, so
- * keyboard automation is unreliable and the webview cannot be intercepted
- * (frozen __TAURI_INTERNALS__, ESM plugin module). outcome words:
- * clicked:invoke | clicked:click | btn-no-rect | dialog-not-found | exec-fail:*
- * the dialog is owned by the main window — the driver searches its subtree. */
-const answerDialog = (name, timeoutMs = 15000) => {
+/** answer the in-app confirm dialog (ConfirmDialog, m7-b — replaced the
+ * native rfd task dialog and its powershell UIA automation — both gone).
+ * the gate flow is: snap the current request id, let the caller trigger the action that
+ * opens the dialog, wait for a NEWER request, click, then resolve from the
+ * page's own published ground truth (window.__cdlg.state). the id scoping
+ * is load-bearing: the dialog opens ~3ms after the trigger (file_exists ipc
+ * precedes it) and a tick racing that window would misread a stale slot as
+ * "no dialog" (s18's week-long flake, root-caused 2026-09-05). never trust
+ * the click's return value — a lost CDP response re-runs the eval on an
+ * already-closed modal and would report "pending" forever. outcomes:
+ * resolved-ok | resolved-mismatch(name) | gone (slot cleared without a
+ * newer request) | NO-dialog-<name> on timeout (ticks + dom in console). */
+const answerDialog = async (name, trigger, timeoutMs = 15000) => {
+  const before = await evalAsync(ws, `window.__cdlg?.id ?? 0`);
+  await trigger();
+  const action = name === "cancel" ? "cancel" : "confirm";
+  const ticks = [];
+  const wantOk = action === "confirm";
   try {
-    return require("child_process").execFileSync(
-      "powershell",
-      ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(__dirname, "answer-dialog.ps1"), "-Title", "file already exists", "-Name", name, "-TimeoutMs", String(timeoutMs)],
-      { encoding: "utf8", timeout: timeoutMs + 10000 },
-    ).trim();
+    // id-scoped ground-truth poll: wait for a request NEWER than the
+    // pre-trigger snapshot, click it, then resolve from the page's own
+    // state. "gone" with a NEWER id means the slot cleared before our
+    // click landed (a race lost is still a real resolution — the caller's
+    // outcome assertions judge whether that outcome was the wanted one).
+    const t0 = Date.now();
+    let seenNewer = false;
+    for (;;) {
+      let v = null;
+      try {
+        v = await evalAsync(ws, `(() => { const g = window.__cdlg, sn = ${seenNewer};
+          if (!g || g.id <= ${before}) return sn ? 'gone-after-newer' : 'waiting';
+          if (g.state === 'resolved') return g.ok === ${wantOk} ? 'resolved-ok' : 'resolved-mismatch';
+          const d = document.querySelector('[data-testid="confirm-dialog"]');
+          if (!d) return 'open-no-dom';
+          const b = d.querySelector('[data-dialog-action="${action}"]');
+          if (!b) return 'open-no-btn';
+          b.click(); return 'clicked'; })()`);
+      } catch (te) {
+        ticks.push({ at: Date.now() - t0, threw: String(te).slice(0, 140) });
+        throw te;
+      }
+      ticks.push({ at: Date.now() - t0, v });
+      if (v === "resolved-ok" || v === "resolved-mismatch") return String(v);
+      if (v === "gone-after-newer") return "gone";
+      if (v !== "waiting") seenNewer = true;
+      if (Date.now() - t0 >= timeoutMs) throw new Error(`evalUntil timeout (${timeoutMs}) confirm dialog → ${name} — ticks=${JSON.stringify(ticks)}`);
+      await sleep(100);
+    }
   } catch (e) {
-    const out = String((e.stdout ?? "") + (e.stderr ? " ERR:" + String(e.stderr).split(/\r?\n/)[0] : "")).trim();
-    return out || `exec-fail:${e.status}`;
+    // evidence, never silence: what did the page look like when the modal
+    // never came up? (overlay present? hints already rendered? exception?)
+    const dom = await evalAsync(ws, `(() => ({ overlay: !!document.querySelector('[data-testid="confirm-overlay"]'), cdlg: window.__cdlg ?? null, last: window.__cdlgLast ?? null, appTail: document.querySelector('.app')?.outerHTML.slice(-300), hints: [...document.querySelectorAll('.hint')].map(h => h.textContent.slice(0, 40)), page: document.querySelector('.tab-btn.active')?.textContent?.trim() }))()`).catch((ee) => ({ probeErr: String(ee).slice(0, 80) }));
+    console.error(`answerDialog(${name}) timeout: last=${String(e).slice(0, 240)} dom=${JSON.stringify(dom)}`);
+    return `NO-dialog-${name}`;
   }
 };
 
@@ -1137,18 +1173,16 @@ S[19] = async () => {
   // step 1: cancel — dialog fires on QUEUE click, cancel queues nothing and
   // renders the composer's overwrite-cancelled feedback (the positive signal
   // that the queue-time gate executed)
-  await queueAgain();
-  const ansA = answerDialog("cancel");
+  const ansA = await answerDialog("cancel", queueAgain);
   const hint = await evalUntil(`(() => [...document.querySelectorAll('.card div')].some(h => h.textContent.includes('queueing cancelled')) ? 'ok' : 'pending')()`, { timeoutMs: 8000, everyMs: 300, label: "cancel feedback (s19)" }).catch(() => "timeout");
   await sleep(800);
   let after = await jobs();
   const newAfterCancel = after.filter((j) => !prior.has(j.id));
   details.push(`cancel: dialog=${ansA}, feedback=${hint === "ok"}, jobs queued=${newAfterCancel.length}`);
-  const cancelOk = ansA.startsWith("clicked") && hint === "ok" && newAfterCancel.length === 0;
+  const cancelOk = (ansA === "resolved-ok" || ansA === "gone") && hint === "ok" && newAfterCancel.length === 0;
   prior = new Set(after.map((j) => j.id));
   // step 2: grant — job queued with overwrite=true, finishes clean
-  await queueAgain();
-  const ansB = answerDialog("overwrite");
+  const ansB = await answerDialog("overwrite", queueAgain);
   details.push(`grant: dialog=${ansB}`);
   let j2 = null;
   for (let i = 0; i < 90; i++) {
@@ -1162,7 +1196,7 @@ S[19] = async () => {
     const stuckState = stuck.filter((j) => !prior.has(j.id)).map((j) => `${j.id.slice(-6)}:${j.state}:${(j.error ?? "").slice(0, 40)}`).join(", ") || "no new jobs";
     let probe = "probe-fail";
     try {
-      probe = require("child_process").execFileSync("powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(__dirname, "answer-dialog.ps1"), "-Title", "file already exists", "-Name", "overwrite", "-TimeoutMs", "3000", "-Probe"], { encoding: "utf8", timeout: 15000 }).trim();
+      probe = await evalAsync(ws, `(() => { const d = document.querySelector('[data-testid="confirm-dialog"]'); return d ? 'modal-visible: ' + d.querySelector('.cdlg-title')?.textContent?.trim() : 'no modal in dom'; })()`);
     } catch { }
     details.push(`TIMEOUT: new jobs=[${stuckState}], dialog ${probe}`);
     record(19, "queue-time overwrite gate (D59)", false, details);
@@ -1179,7 +1213,7 @@ S[19] = async () => {
   } catch { ow = "db-err"; }
   const mtime1 = fs.existsSync(target) ? fs.statSync(target).mtimeMs : 0;
   details.push(`options.overwrite=${ow}; file re-downloaded (mtime advanced): ${mtime1 > mtime0}`);
-  record(19, "queue-time overwrite gate (D59)", !!(cancelOk && ansB.startsWith("clicked") && j2.state === "done" && !(j2.error ?? "") && ow === "true" && mtime1 > mtime0), details);
+  record(19, "queue-time overwrite gate (D59)", !!(cancelOk && ansB === "resolved-ok" && j2.state === "done" && !(j2.error ?? "") && ow === "true" && mtime1 > mtime0), details);
 };
 
 /** wipe all persisted state except the staged managed binaries — every
@@ -1278,6 +1312,12 @@ async function main() {
   seedSettings();
   const { ws: socket } = await launchAndAttach(EXE, PORT);
   ws = socket;
+  // page errors are evidence: surface the webview's console into the run log
+  socket.on("event", (m) => {
+    if (m.method === "Runtime.consoleAPICalled" && ["error", "warning"].includes(m.params.type)) {
+      console.error(`[page:${m.params.type}]`, (m.params.args ?? []).map((a) => a.value ?? a.description ?? "").join(" ").slice(0, 300));
+    }
+  });
   await sleep(1200);
   await injectBundle();
   // wait for react hydration + the one late vite reload to settle before

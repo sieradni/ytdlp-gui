@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import TabBar from "./components/TabBar";
 import FirstRunWizard from "./components/FirstRunWizard";
 import UpdateBanner from "./components/UpdateBanner";
+import { ConfirmDialogHost } from "./components/ConfirmDialog";
 import HomePage from "./pages/Home";
 import HistoryPage from "./pages/History";
 import SettingsPage from "./pages/Settings";
@@ -85,6 +86,7 @@ export default function App() {
       )}
       <UpdateBanner />
       {loaded && wizardOpen && <FirstRunWizard />}
+      <ConfirmDialogHost />
     </div>
   );
 }

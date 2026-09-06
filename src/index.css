@@ -513,3 +513,82 @@ tbody tr:hover {
     animation-duration: 0.01ms !important;
   }
 }
+
+/* ===== app-owned confirm dialog (m7-b; replaces windows message boxes) =====
+ * amber-accented warning modal on the design tokens. animation respects the
+ * global reduced-motion rule above. */
+.cdlg-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 60; /* above the wizard (z-50) so confirms work from anywhere */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(6, 8, 10, 0.62);
+  backdrop-filter: blur(2px);
+  animation: cdlg-fade 140ms ease-out;
+}
+@keyframes cdlg-fade {
+  from {
+    opacity: 0;
+  }
+}
+.cdlg {
+  width: 400px;
+  max-width: 92vw;
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-top: 2px solid var(--amber-border);
+  border-radius: var(--radius);
+  box-shadow:
+    0 18px 50px rgba(0, 0, 0, 0.55),
+    0 2px 10px rgba(0, 0, 0, 0.4);
+  padding: 14px 16px 12px;
+  animation: cdlg-in 160ms cubic-bezier(0.2, 0.9, 0.3, 1.2);
+}
+@keyframes cdlg-in {
+  from {
+    opacity: 0;
+    transform: translateY(7px) scale(0.97);
+  }
+}
+.cdlg-title {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 13.5px;
+  font-weight: 700;
+  color: var(--text);
+}
+.cdlg-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  font-size: 13px;
+  flex: none;
+}
+.cdlg-icon.warning {
+  color: var(--amber);
+  background: var(--amber-soft);
+  border: 1px solid var(--amber-border);
+}
+.cdlg-icon.info {
+  color: var(--green);
+  background: var(--green-soft);
+  border: 1px solid var(--green);
+}
+.cdlg-body {
+  margin: 10px 0 14px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--muted);
+  white-space: pre-line;
+}
+.cdlg-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}

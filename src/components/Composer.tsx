@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ask, open } from "@tauri-apps/plugin-dialog";
+import { open } from "@tauri-apps/plugin-dialog";
+import { confirmDialog } from "./ConfirmDialog";
 import { useQueue } from "../stores/queue";
 import { useSettings } from "../stores/settings";
 import { migrationStatus, overwriteTargets, type AudioFormat, type JobOptions, type PlaylistMode } from "../lib/ipc";
@@ -120,10 +121,13 @@ export default function Composer() {
       }
       if (targets.length > 0) {
         const list = targets.map((t) => `“${t.name}”`).join("\n");
-        const ok = await ask(
-          `${list} already exists in the destination.\n\nQueuing replaces it with a fresh download (metadata re-embedded) using the current composer settings.`,
-          { title: "file already exists", kind: "warning", okLabel: "overwrite", cancelLabel: "cancel" },
-        );
+        // m7-b: in-app confirm (chime + modal) replaces the windows task dialog
+        const ok = await confirmDialog({
+          title: "file already exists",
+          body: `${list} already exists in the destination.\n\nQueuing replaces it with a fresh download (metadata re-embedded) using the current composer settings.`,
+          confirmLabel: "overwrite",
+          cancelLabel: "cancel",
+        });
         if (!ok) {
           setFeedback({ queued: 0, dupes: 0, invalid: [], overwriteCancelled: true });
           return;

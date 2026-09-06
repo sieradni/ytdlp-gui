@@ -1,7 +1,7 @@
 // interrogate the d59 queue-time gate against the CURRENT on-disk state
 // (archive: soundcloud 293 + existing flickermood file) — answers, with live
 // evidence: (1) does overwrite_targets treat the archived url as safe? (2)
-// does a real composer click still open the native dialog anyway?
+// does a real composer click still open the confirm modal anyway?
 const path = require("path");
 const { execSync } = require("child_process");
 const { launchAndAttach, evalAsync, sleep } = require("./cdp.cjs");
@@ -33,15 +33,8 @@ const { launchAndAttach, evalAsync, sleep } = require("./cdp.cjs");
   await sleep(300);
   evalAsync(ws, `(() => { const b = [...document.querySelectorAll('.card button')].find(x => x.textContent.trim() === 'queue downloads'); if (!b) return 'no-btn'; b.click(); return 'clicked'; })()`).catch(() => "click-err");
   await sleep(6000);
-  let dialog = "(probe failed)";
-  try {
-    dialog = execSync(
-      `powershell -NoProfile -File scripts/e2e/answer-dialog.ps1 -Title 'file already exists' -Name overwrite -TimeoutMs 2500 -Probe`,
-      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
-    ).trim();
-  } catch (e) {
-    dialog = "(no dialog — probe exit " + e.status + ")";
-  }
+  // m7-b: the gate's confirm is the in-app modal now — probe the dom
+  const dialog = await evalAsync(ws, `(() => { const d = document.querySelector('[data-testid="confirm-dialog"]'); return d ? 'modal-visible: ' + d.querySelector('.cdlg-title')?.textContent?.trim() : 'no modal in dom'; })()`).catch((e) => "(probe failed) " + e.message);
   console.log("dialog probe after click:", dialog);
   const jobs = await invoke("queue_list").catch((e) => "ERR " + e.message);
   const f = (Array.isArray(jobs) ? jobs : []).filter((j) => j.url.includes("flickermood"));

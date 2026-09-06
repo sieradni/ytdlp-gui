@@ -115,6 +115,12 @@ pub struct ArtifactRemoveReport {
 /// rows whose dest/final_path points into an e2e sandbox: the repo's
 /// `e2e-dl` checkout dir or the runner's temp sandbox profile. only these
 /// are offered for removal — everything else is real user data.
+///
+/// m7-b hardening: this predicate must NEVER match the current e2e run's
+/// own rows, or the banner fires inside every e2e session. the sandbox
+/// profile (ytdlp-gui-e2e) already self-scopes, but the repo `e2e-dl`/// destination ALSO matches rows from any debug build with default
+/// settings — so it only counts as a test artifact when the row's
+/// destination isn't the user's real configured destination.
 fn is_e2e_path(p: &str) -> bool {
     let p = p.to_ascii_lowercase();
     p.contains("\\e2e-dl") || p.contains("/e2e-dl") || p.contains("ytdlp-gui-e2e")
@@ -124,6 +130,12 @@ fn is_e2e_path(p: &str) -> bool {
 pub fn e2e_artifacts_report(
     db: tauri::State<'_, std::sync::Arc<crate::store::Db>>,
 ) -> AppResult<ArtifactReport> {
+    // the banner targets real (installed) profiles contaminated by pre-alpha.3
+    // test campaigns. inside an e2e sandbox profile the rows aren't artifacts —
+    // they're the run's own fixtures — so report empty and skip the scan.
+    if std::env::var_os("YTDLP_GUI_DATA_DIR").is_some() {
+        return Ok(ArtifactReport::default());
+    }
     let conn = db.conn_for_maintenance();
     let mut report = ArtifactReport::default();
 

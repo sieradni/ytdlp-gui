@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
-import { open as openDialog, ask } from "@tauri-apps/plugin-dialog";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { confirmDialog } from "../components/ConfirmDialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
   e2eArtifactsRemove,
@@ -121,10 +122,13 @@ export default function HistoryPage() {
     let overwrite = false;
     if (row.finalPath && (await fileExists(row.finalPath))) {
       const name = row.finalPath.split(/[\\/]/).pop() ?? row.finalPath;
-      const ok = await ask(
-        `“${name}” already exists on disk.\n\nRe-download replaces it with a fresh download (metadata re-embedded) using the current composer settings.`,
-        { title: "file already exists", kind: "warning", okLabel: "overwrite", cancelLabel: "cancel" },
-      );
+      // m7-b: in-app confirm (chime + modal) replaces the windows task dialog
+      const ok = await confirmDialog({
+        title: "file already exists",
+        body: `“${name}” already exists on disk.\n\nRe-download replaces it with a fresh download (metadata re-embedded) using the current composer settings.`,
+        confirmLabel: "overwrite",
+        cancelLabel: "cancel",
+      });
       if (!ok) {
         setImportMsg("re-download cancelled — file already exists (nothing queued)");
         return;
