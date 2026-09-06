@@ -147,6 +147,7 @@ Var WixMode
 Var OldMainBinaryName
 Var DataChoice ; d68 uninstaller: 0 = keep app data (default), 1 = remove
 Var DataDefaultDir ; d66: where .onInit resolved the default install dir
+Var PrevVersion ; d74: installed version, shown on the same-version page
 
 Name "${PRODUCTNAME}"
 BrandingText "${COPYRIGHT}"
@@ -251,9 +252,20 @@ VIAddVersionKey "ProductVersion" "${VERSION}"
 ; ---------------------------------------------------------------------------
 Function YtgDirPagePre
   ${IfThen} $PassiveMode = 1  ${|} Abort ${|} ; replaces the stock SkipIfPassive
-  ; .onInit already resolved $INSTDIR (fresh default or previous install).
-  ; remember it so cancel can restore the value the user would have seen
-  ; pre-dialog.
+  ; d74: an upgrade installs where the old version lives — full stop. the
+  ; previous location was restored into $INSTDIR by .onInit; re-asking "where
+  ; should we put it?" right after the user already approved replacing the
+  ; old version is a question with one right answer. note: on upgrades this
+  ; page is typically skipped entirely anyway (PageReinstall auto-advances
+  ; via PageLeaveReinstall → reinst_done → this page's PRE hook runs with
+  ; $INSTDIR already correct, so we abort silently).
+  ReadRegStr $4 SHCTX "${MANUPRODUCTKEY}" ""
+  ${If} $4 != ""
+    StrCpy $INSTDIR $4
+    Abort
+  ${EndIf}
+  ; fresh install: remember the resolved default so cancel can restore it,
+  ; then open the modern folder picker (pre-Vista falls through to stock UI).
   StrCpy $DataDefaultDir $INSTDIR
   Call BrowseForFolderVista
   Pop $0
@@ -280,15 +292,20 @@ Function un.DataPageCreate
   ${OrIf} $UpdateMode = 1
     Abort
   ${EndIf}
-  !insertmacro MUI_HEADER_TEXT "App data" "Keep or remove your ytdlp-gui data"
-  ${NSD_CreateLabel} 0 10u 100% 20u "Keep your download history, the download archive and the managed yt-dlp/ffmpeg tools (~150 MB)? They live in %APPDATA%\ytdlp-gui and are NOT part of the program files."
+  !insertmacro MUI_HEADER_TEXT "App data" "Decide what happens to your ytdlp-gui data"
+  ; d74: the two choices have distinct purposes and the page must say so.
+  ; keep = upgrading/reinstalling now or later — everything (history,
+  ; archive, settings, managed yt-dlp/ffmpeg) is reattached by the next
+  ; install. remove = a deliberate full reset (fresh start); to re-download
+  ; tools next time. downloads media is never touched either way.
+  ${NSD_CreateLabel} 0 8u 100% 30u "Your download history, the download archive, settings and the managed yt-dlp/ffmpeg tools (~150 MB) live in %APPDATA%\ytdlp-gui — outside the program files being uninstalled now.$\n$\nWhat should happen to them?"
   Pop $0
-  ${NSD_CreateRadioButton} 10u 40u 90% 10u "Keep app data (recommended) — install it again later and everything is still there"
+  ${NSD_CreateRadioButton} 10u 46u 90% 10u "Keep app data (recommended) — reinstalls attach to it automatically; nothing is re-downloaded"
   Pop $1
-  ${NSD_CreateRadioButton} 20u 54u 90% 10u "Also remove app data (history, downloaded.txt, managed tools ~150 MB)"
+  ${NSD_CreateRadioButton} 20u 60u 90% 10u "Remove app data too — full reset: history, archive and managed tools are deleted (tools re-download ~150 MB on the next install)"
   Pop $2
   ${NSD_Check} $1
-  ${NSD_CreateLabel} 20u 70u 90% 10u "Your downloaded media files are never touched by either choice."
+  ${NSD_CreateLabel} 20u 76u 90% 10u "Your downloaded media files (videos, music) are never touched by either choice."
   Pop $3
 FunctionEnd
 
@@ -362,9 +379,23 @@ Function PageReinstall
     ReadRegStr $R0 SHCTX "${UNINSTKEY}" "DisplayVersion"
   ${EndIf}
   ${IfThen} $R0 == "" ${|} StrCpy $R4 "$(unknown)" ${|}
+  StrCpy $PrevVersion $R0 ; d74: keep the real version for the override string
 
   nsis_tauri_utils::SemverCompare "${VERSION}" $R0
   Pop $R0
+  ; d74: a strict upgrade replaces in place without asking. nothing on this
+  ; page is a decision the user can act on better than the default: the
+  ; install step overwrites every program file, the uninstaller is refreshed,
+  ; and app data is independent of this choice (d68). seen only for
+  ; same-version (repair vs clean) and downgrade runs.
+  ${If} $R0 = 1
+    ; $ReinstallPageCheck = 2 = "second radio" = the dontUninstall branch →
+    ; PageLeaveReinstall takes reinst_done: no embedded uninstall round-trip,
+    ; the install section overwrites the old program files directly.
+    StrCpy $ReinstallPageCheck 2
+    Call PageLeaveReinstall
+    Return
+  ${EndIf}
   ; Reinstalling the same version
   ${If} $R0 = 0
     StrCpy $R1 "$(alreadyInstalledLong)"
@@ -441,7 +472,18 @@ Function PageReinstallUpdateSelection
   ${EndIf}
 FunctionEnd
 Function PageLeaveReinstall
-  ${NSD_GetState} $R2 $R1
+  ; d74: $ReinstallPageCheck is kept in sync by PageReinstallUpdateSelection on
+  ; every radio click; the auto-upgrade path sets it without building a page.
+  ; derive $R1 (1 = first radio / uninstall-first, 0 = second / replace in
+  ; place) from it; the control read is only the fallback for a first run
+  ; where the user never touched the radios.
+  ${If} $ReinstallPageCheck = 1
+    StrCpy $R1 1
+  ${ElseIf} $ReinstallPageCheck = 2
+    StrCpy $R1 0
+  ${Else}
+    ${NSD_GetState} $R2 $R1
+  ${EndIf}
 
   ; If migrating from Wix, always uninstall
   ${If} $WixMode = 1
@@ -555,42 +597,17 @@ FunctionEnd
 
 ; Uninstaller Pages
 ; 1. Confirm uninstall page
+; d74: the stock template injects a "Delete the application data" checkbox on
+; this page; we removed it — the dedicated custom page below is the single
+; place that decision is made (its radio explains the consequences; the
+; checkbox was unexplained and asked the same thing twice).
 Var DeleteAppDataCheckbox
 Var DeleteAppDataCheckboxState
 !define /ifndef WS_EX_LAYOUTRTL         0x00400000
-!define MUI_PAGE_CUSTOMFUNCTION_SHOW un.ConfirmShow
-Function un.ConfirmShow ; Add add a `Delete app data` check box
-  ; $1 inner dialog HWND
-  ; $2 window DPI
-  ; $3 style
-  ; $4 x
-  ; $5 y
-  ; $6 width
-  ; $7 height
-  FindWindow $1 "#32770" "" $HWNDPARENT ; Find inner dialog
-  System::Call "user32::GetDpiForWindow(p r1) i .r2"
-  ${If} $(^RTL) = 1
-    StrCpy $3 "${__NSD_CheckBox_EXSTYLE} | ${WS_EX_LAYOUTRTL}"
-    IntOp $4 50 * $2
-  ${Else}
-    StrCpy $3 "${__NSD_CheckBox_EXSTYLE}"
-    IntOp $4 0 * $2
-  ${EndIf}
-  IntOp $5 100 * $2
-  IntOp $6 400 * $2
-  IntOp $7 25 * $2
-  IntOp $4 $4 / 96
-  IntOp $5 $5 / 96
-  IntOp $6 $6 / 96
-  IntOp $7 $7 / 96
-  System::Call 'user32::CreateWindowEx(i r3, w "${__NSD_CheckBox_CLASS}", w "$(deleteAppData)", i ${__NSD_CheckBox_STYLE}, i r4, i r5, i r6, i r7, p r1, i0, i0, i0) i .s'
-  Pop $DeleteAppDataCheckbox
-  SendMessage $HWNDPARENT ${WM_GETFONT} 0 0 $1
-  SendMessage $DeleteAppDataCheckbox ${WM_SETFONT} $1 1
+Function un.ConfirmShow ; no-op since d74: the checkbox lives on the data page below
 FunctionEnd
-!define MUI_PAGE_CUSTOMFUNCTION_LEAVE un.ConfirmLeave
 Function un.ConfirmLeave
-  SendMessage $DeleteAppDataCheckbox ${BM_GETCHECK} 0 0 $DeleteAppDataCheckboxState
+  ; DeleteAppDataCheckboxState stays 0 — the decision is the data page's
 FunctionEnd
 !define MUI_PAGE_CUSTOMFUNCTION_PRE un.SkipIfPassive
 !insertmacro MUI_UNPAGE_CONFIRM
@@ -607,6 +624,18 @@ FunctionEnd
 {{#each languages}}
 !insertmacro MUI_LANGUAGE "{{this}}"
 {{/each}}
+; ---------------------------------------------------------------------------
+; d74: override the stock reinstall-page strings. the tauri defaults frame a
+; version upgrade as "recommended to uninstall" and offer a bare "Do not
+; uninstall", which reads like a warning about an unsupported path — for a
+; normal, fully supported upgrade. new wording: the choice is about *how* the
+; old version makes way (replace in place, or clean sweep first), and both
+; choices keep app data (history/archive/managed tools are never program
+; files; only the uninstaller's separate data question can remove them).
+; ---------------------------------------------------------------------------
+LangString olderOrUnknownVersionInstalled ${LANG_ENGLISH} "Version $PrevVersion of ${PRODUCTNAME} is already installed. Choose how this upgrade should replace it — your download history, archive and settings are kept either way."
+LangString uninstallBeforeInstalling ${LANG_ENGLISH} "Recommended: uninstall the old version first (clean sweep of the program files)"
+LangString dontUninstall ${LANG_ENGLISH} "Replace in place (fastest — overwrites the old program files)"
 !insertmacro MUI_RESERVEFILE_LANGDLL
 {{#each language_files}}
   !include "{{this}}"

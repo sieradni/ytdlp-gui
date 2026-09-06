@@ -1,6 +1,6 @@
 [package]
 name = "ytdlp-gui"
-version = "2.0.0-alpha.4"
+version = "2.0.0-alpha.5"
 description = "modern windows gui for yt-dlp"
 authors = ["ytdlp-gui"]
 edition = "2021"
