@@ -29,6 +29,23 @@ pub struct AddFeedback {
 
 /// `jobAdd(urls, options): Job[]` — lenient intake happens in Rust (§5.2);
 /// the feedback card gets per-line reasons for invalid lines.
+/// the destination fallback chain (d78: per-job → setting → windows
+/// downloads), shared by job_add and the settings page's effective-path
+/// display — one function so the ui can never disagree with the engine.
+fn resolve_destination(
+    destination: Option<String>,
+    settings: &crate::settings::Settings,
+) -> String {
+    destination
+        .or_else(|| settings.destination.clone())
+        .filter(|d| !d.trim().is_empty())
+        .unwrap_or_else(|| {
+            dirs::download_dir()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|| std::env::temp_dir().to_string_lossy().into_owned())
+        })
+}
+
 #[tauri::command]
 pub fn job_add(
     handle: tauri::State<'_, QueueHandle>,
@@ -37,19 +54,23 @@ pub fn job_add(
     options: JobOptions,
     destination: Option<String>,
 ) -> AppResult<AddFeedback> {
-    let dest = destination
-        .or(settings.get().destination)
-        .unwrap_or_else(|| {
-            dirs::download_dir()
-                .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or_else(|| std::env::temp_dir().to_string_lossy().into_owned())
-        });
+    let dest = resolve_destination(destination, &settings.get());
     let (jobs, invalid, dupes) = handle.0.add_urls(&urls, &options, &dest)?;
     Ok(AddFeedback {
         jobs,
         invalid,
         duplicates_skipped: dupes,
     })
+}
+
+/// d81: the destination downloads actually land in when nothing is set —
+/// settings populates its output-folder field with this instead of showing
+/// an empty box (the user should see the real path, not a guess).
+#[tauri::command]
+pub fn effective_destination(
+    settings: tauri::State<'_, crate::settings::SettingsHandle>,
+) -> String {
+    resolve_destination(None, &settings.get())
 }
 
 #[tauri::command]

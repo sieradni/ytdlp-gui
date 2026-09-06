@@ -32,6 +32,9 @@ export interface ToolStatus {
   custom: boolean;
   updateAvailable: boolean;
   latestTag: string | null;
+  /** publish date (iso) of the latest release — d81: the honest identity
+   * for rolling sources whose tag is always "latest" */
+  latestPublished: string | null;
   staged: boolean;
   /** unix seconds of the last release check (D42) */
   lastChecked: number | null;
@@ -84,6 +87,8 @@ export interface Settings {
 
 export const settingsGet = () => invoke<Settings>("settings_get");
 export const settingsSave = (settings: Settings) => invoke<void>("settings_save", { settings });
+/** d81: where downloads land when neither the job nor settings set one. */
+export const effectiveDestination = () => invoke<string>("effective_destination");
 
 // ---------------------------------------------------------------------------
 // composer options — mirrors src-tauri/src/engine/args.rs (D19: one shape)

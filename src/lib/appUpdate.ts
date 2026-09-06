@@ -3,7 +3,9 @@
  * (minisign-verified latest.json), plugin-process performs the relaunch.
  *
  * lifecycle: idle → checking → available | up-to-date → downloading (x%)
- * → installing (relaunch) | error. polls on launch + every 6 h (§8).
+ * → installing (relaunch) | error. checks on launch only (d81: the 6 h
+ * interval was removed — a download manager doesn't need a background
+ * poller; "check now" is always available).
  * all failures land in `error` and never crash the ui — the updater is
  * strictly a background convenience (D30).
  */
@@ -36,7 +38,7 @@ interface AppUpdateState {
   startInstall: () => Promise<void>;
 }
 
-const SIX_HOURS_MS = 6 * 60 * 60 * 1000;
+const LAUNCH_CHECK_DELAY_MS = 4_000;
 
 export const useAppUpdate = create<AppUpdateState>((set, get) => ({
   phase: "idle",
@@ -110,13 +112,14 @@ export const useAppUpdate = create<AppUpdateState>((set, get) => ({
   },
 }));
 
-/** launch poll + 6 h interval (§8). returns a cleanup fn. */
+/** launch-only check (d81). returns a cleanup fn. */
 export function attachAppUpdatePolling(): () => void {
-  // small startup delay so the poll never competes with first paint
-  const launchTimer = setTimeout(() => void useAppUpdate.getState().checkNow(false), 4_000);
-  const interval = setInterval(() => void useAppUpdate.getState().checkNow(false), SIX_HOURS_MS);
+  // small startup delay so the check never competes with first paint
+  const launchTimer = setTimeout(
+    () => void useAppUpdate.getState().checkNow(false),
+    LAUNCH_CHECK_DELAY_MS,
+  );
   return () => {
     clearTimeout(launchTimer);
-    clearInterval(interval);
   };
 }

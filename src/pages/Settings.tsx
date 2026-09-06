@@ -1,8 +1,10 @@
 import { SavedFlash } from "../components/SavedFlash";
 import ToolRow from "../components/ToolRow";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { useEffect, useState } from "react";
 import { getVersion } from "@tauri-apps/api/app";
-import { appResetData, type ResetReport } from "../lib/ipc";
+import { appResetData, effectiveDestination, type ResetReport } from "../lib/ipc";
 import { useAppUpdate } from "../lib/appUpdate";
 import { useBinaries } from "../stores/binaries";
 import { useQueue } from "../stores/queue";
@@ -33,11 +35,6 @@ export default function SettingsPage() {
               <div className="hint">loading…</div>
             </>
           )}
-          <label></label>
-          <div className="hint">
-            checking and updating are manual — updates download and install
-            in-app, nothing runs on its own.
-          </div>
           <label>app updates</label>
           <AppUpdateRow />
           <label></label>
@@ -60,15 +57,7 @@ export default function SettingsPage() {
         </div>
         <div className="card-b fgrid">
           <label>output folder</label>
-          <div className="row flex items-center gap-2">
-            <input
-              type="text"
-              className="grow"
-              value={settings.destination ?? ""}
-              placeholder="e.g. C:\Users\you\Downloads"
-              onChange={(e) => void update({ destination: e.target.value })}
-            />
-          </div>
+          <OutputFolderRow />
           <label>concurrent</label>
           <div className="row flex items-center gap-2">
             <select
@@ -86,14 +75,7 @@ export default function SettingsPage() {
           </div>
           <label>archive file</label>
           <div className="row flex items-center gap-2 min-w-0">
-            <span className="hint grow" style={{ overflowWrap: "anywhere" }}>
-              managed by the app — import/export it from the history page
-            </span>
-          </div>
-          <label></label>
-          <div className="hint">
-            the archive records what's already been downloaded, so re-queuing
-            skips it. import or export it from history → footer.
+            <ArchiveReveal />
           </div>
         </div>
       </div>
@@ -114,7 +96,7 @@ export default function SettingsPage() {
           </div>
           <div className="app-row">
             <span className="app-key">license</span>
-            <span className="hint">unlicense — do whatever</span>
+            <span className="hint">apache license 2.0</span>
           </div>
           <div className="app-row" style={{ alignItems: "flex-start" }}>
             <span className="app-key" style={{ paddingTop: 2 }}>
@@ -198,6 +180,84 @@ function ResetRow() {
   );
 }
 
+/** d81: the output-folder field is never empty — it shows the path downloads
+ * actually use (the setting, or the effective windows-downloads fallback when
+ * unset). editing sets the setting; clearing falls back to the real default
+ * (shown as the value again), and the picker is the full explorer dialog. */
+function OutputFolderRow() {
+  const { settings, update } = useSettings();
+  const [fallback, setFallback] = useState<string | null>(null);
+  const [picking, setPicking] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    void effectiveDestination().then((p) => {
+      if (alive) setFallback(p);
+    });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const value = settings.destination?.trim() ? settings.destination : (fallback ?? "");
+  const isFallback = !settings.destination?.trim();
+
+  const pick = async () => {
+    setPicking(true);
+    try {
+      const picked = await openDialog({ directory: true, multiple: false, defaultPath: value || undefined });
+      if (typeof picked === "string") await update({ destination: picked });
+    } finally {
+      setPicking(false);
+    }
+  };
+
+  return (
+    <div className="row flex items-center gap-2 min-w-0">
+      <input
+        type="text"
+        className="grow"
+        value={value}
+        style={isFallback ? { color: "var(--muted)" } : undefined}
+        title={isFallback ? "default — no custom output folder is set; edit to override" : undefined}
+        onChange={(e) => void update({ destination: e.target.value })}
+      />
+      <button className="btn sm" disabled={picking} onClick={() => void pick()}>
+        browse…
+      </button>
+    </div>
+  );
+}
+
+/** d81: the archive lives at a fixed app-data path; settings just offers
+ * the reveal affordance (import/export live on the history page). */
+function ArchiveReveal() {
+  const [path, setPath] = useState<string | null>(null);
+  useEffect(() => {
+    let alive = true;
+    void import("../lib/ipc").then(({ appPaths }) =>
+      appPaths().then((p) => {
+        if (alive) setPath(p.archivePath);
+      }),
+    );
+    return () => {
+      alive = false;
+    };
+  }, []);
+  return (
+    <>
+      <button
+        className="btn sm ghost"
+        onClick={() => path && void revealItemInDir(path)}
+        disabled={!path}
+      >
+        reveal archive
+      </button>
+      {path && <span className="hint" style={{ overflowWrap: "anywhere" }}>{path}</span>}
+    </>
+  );
+}
+
 /** Real app version from the Tauri runtime — never a hardcoded literal,
  * so it stays truthful after an in-app update. */
 function useAppVersion(): string | null {
@@ -246,7 +306,7 @@ function AppUpdateRow() {
       hint = `update check failed: ${error ?? "?"}`;
       break;
     default:
-      hint = "checks on launch and every 6 h";
+      hint = "checks on launch";
   }
 
   const busy = phase === "checking" || phase === "downloading" || phase === "installing";

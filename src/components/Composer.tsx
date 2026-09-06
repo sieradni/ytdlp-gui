@@ -165,7 +165,7 @@ export default function Composer() {
     <div className="card">
       <div className="card-h">
         <h2>add downloads</h2>
-        <span className="hint">one url per line · playlist urls fetch multiple items · enter to queue</span>
+        <span className="hint">one url per line · enter to queue</span>
       </div>
       <div className="card-b">
         <textarea
@@ -571,7 +571,7 @@ function CmdPreview(props: {
   return (
     <div className="cmdprev">
       <div className="cmdprev-head">
-        <span className="hint">command preview — order of flags doesn't matter; this is the exact argv</span>
+        <span className="hint">command preview — the exact argv</span>
         <span className="grow" />
         {plumbingCount > 0 && (
           <button className="btn sm ghost" onClick={props.onTogglePlumbing}>

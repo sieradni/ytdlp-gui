@@ -2,6 +2,7 @@
 name = "ytdlp-gui"
 version = "2.0.0-alpha.6"
 description = "modern windows gui for yt-dlp"
+license = "Apache-2.0"
 authors = ["ytdlp-gui"]
 edition = "2021"
 

@@ -115,6 +115,7 @@ pub fn run() {
             commands::binaries::binaries_check_latest,
             commands::binaries::binaries_set_custom_path,
             commands::jobs::job_add,
+            commands::jobs::effective_destination,
             commands::jobs::job_stop,
             commands::jobs::job_retry,
             commands::jobs::job_remove,

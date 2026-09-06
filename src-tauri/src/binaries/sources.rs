@@ -103,6 +103,10 @@ pub struct LatestRelease {
     /// release-level etag; stored in the manifest and replayed with
     /// If-None-Match so routine checks cost one 304 (D42).
     pub etag: Option<String>,
+    /// when the release was published (iso-8601). rolling sources (btbN)
+    /// re-publish one tag daily — the tag alone is meaningless in the ui,
+    /// the publish date is what tells the user what they'd update to.
+    pub published_at: Option<String>,
 }
 
 /// http client configured once (rustls per the §2 stack — no openssl).
@@ -170,6 +174,7 @@ async fn latest_from_source(
         asset_url,
         sums_url,
         etag,
+        published_at: json["published_at"].as_str().map(str::to_owned),
     }))
 }
 

@@ -14,10 +14,15 @@ import { useBinaries } from "../stores/binaries";
  * update. "update = download latest build, verify sha-256, swap atomically.
  * never automatic." ffmpeg's update is strictly user-initiated (D20).
  */
-/** d77: btbN's rolling release is literally tagged "latest" — showing
- * `latest: latest` confused everyone. name it for what it is instead. */
-function latestDisplay(tag: string): string {
-  return tag === "latest" ? "rolling release (btbn)" : tag;
+/** d77/d81: the "latest" line answers "what would I update to?". btbN's
+ * rolling release is literally tagged `latest` — echoing the tag shows
+ * `latest: latest`, which identifies nothing. the publish date (captured
+ * at check time) is the honest identity; tagged releases keep their tag. */
+function latestDisplay(tag: string, published: string | null): string {
+  if (tag === "latest") {
+    return published ? `nightly ${published.slice(0, 10)}` : "rolling release (btbn)";
+  }
+  return tag;
 }
 
 export default function ToolRow({ status }: { status: ToolStatus }) {
@@ -34,7 +39,11 @@ export default function ToolRow({ status }: { status: ToolStatus }) {
       const after = await binariesCheckLatest(tool);
       // informational only — availability is the badge (record_check); for
       // btbN the tag is literally "latest" so never compare it to the version
-      setMsg(after.latestTag ? `latest: ${after.latestTag}` : null);
+      setMsg(
+        after.latestTag
+          ? `latest: ${latestDisplay(after.latestTag, after.latestPublished ?? null)}`
+          : null,
+      );
       await refresh();
     } catch (e) {
       setMsg(String(e));
@@ -125,7 +134,7 @@ export default function ToolRow({ status }: { status: ToolStatus }) {
           {msg
             ? msg
             : status.lastChecked
-              ? `last checked ${new Date(status.lastChecked * 1000).toLocaleString()}${status.latestTag ? ` · latest: ${latestDisplay(status.latestTag)}` : ""}`
+              ? `last checked ${new Date(status.lastChecked * 1000).toLocaleString()}${status.latestTag ? ` · latest: ${latestDisplay(status.latestTag, status.latestPublished ?? null)}` : ""}`
               : "never checked"}
         </div>
       </div>

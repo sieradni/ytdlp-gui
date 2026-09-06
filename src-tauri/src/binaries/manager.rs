@@ -70,6 +70,11 @@ pub struct ToolEntry {
     pub etag: Option<String>,
     /// latest release tag seen at install/check time; "update available"
     /// compares against this (D42 stores check state; the tag is what makes
+    /// the comparison). d81: its publish date is stored alongside — rolling
+    /// sources re-publish one tag, so the date is the displayable identity.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_published: Option<String>,
+    /// latest release tag seen at install/check time (D42; what makes
     /// btbN's rolling "latest" tag comparable).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub latest_tag: Option<String>,
@@ -448,6 +453,10 @@ pub struct ToolStatus {
     pub custom: bool,
     pub update_available: bool,
     pub latest_tag: Option<String>,
+    /// when the latest release was published (iso-8601, from the check that
+    /// fetched it). d81: rolling sources (btbN) re-publish the tag "latest"
+    /// daily — the date is the only honest answer to "what would I update to?".
+    pub latest_published: Option<String>,
     pub staged: bool,
     /// unix seconds of the last release check (D42; C6 surfaces it in the
     /// tools card so "when did I last check?" has an answer).
@@ -524,6 +533,7 @@ pub fn status(m: &Manifest) -> BinaryManifest {
             // status only reports what the manifest already knows.
             update_available: false,
             latest_tag: entry.and_then(|e| e.latest_tag.clone()),
+            latest_published: entry.and_then(|e| e.latest_published.clone()),
             staged: entry.map(|e| e.staged).unwrap_or(false),
             last_checked: entry.and_then(|e| e.last_checked),
         }
@@ -582,6 +592,7 @@ pub fn record_check(tool: Tool, rel: &LatestRelease) -> AppResult<Option<String>
         tool,
     );
     entry.latest_tag = Some(rel.tag.clone());
+    entry.latest_published = rel.published_at.clone();
     entry.last_checked = Some(now_unix());
     // the etag is stored WITH its source so the next check replays it only
     // against that source (the replay side already filters by source id).
@@ -647,6 +658,7 @@ mod tests {
                 source: "github".into(),
                 etag: Some("\"abc\"".into()),
                 latest_tag: Some("2026.09.01".into()),
+                latest_published: Some("2026-09-01T00:00:00Z".into()),
                 last_checked: Some(1_700_000_000),
                 pinned: false,
                 custom_path: None,
@@ -773,6 +785,7 @@ mod tests {
             asset_url: Some("https://x/ffmpeg.zip".into()),
             sums_url: None,
             etag: Some("\"bbb\"".into()),
+            published_at: None,
         };
         let rel_b_new = LatestRelease {
             etag: Some("\"ccc\"".into()),
@@ -784,6 +797,7 @@ mod tests {
             asset_url: Some("https://x/ffmpeg-9.0.1.zip".into()),
             sums_url: None,
             etag: Some("\"ggg\"".into()),
+            published_at: None,
         };
         // btbn-served install, the same btbn release still up: NO badge
         // (alpha.2 showed a perpetual one — the tag is "latest" forever).
@@ -837,6 +851,7 @@ mod tests {
             asset_url: Some("https://x/yt-dlp.exe".into()),
             sums_url: None,
             etag: Some("\"y1\"".into()),
+            published_at: None,
         };
         assert!(!update_available_for(
             "github",
