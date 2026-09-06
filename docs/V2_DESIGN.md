@@ -559,12 +559,13 @@ app-data:
 | # | Deliverable | Exit criteria |
 |---|---|---|
 | M0 | UI mockup | **Done — approved** (`mockup/index.html`, M0.5) |
-| M1 | Scaffold + shell | Tauri 2 + React runs; top tabs; Cascadia bundled; palette tokens; strict CSP; typed IPC ping |
-| M2 | Binary manager | First-run wizard installs + sha256-verifies yt-dlp/FFmpeg; ETag check; atomic swap update |
-| M3 | Queue parity | §5 engine + composer + queue table (accent bars, sort menu, lifecycle, expandable output, hover card); SQLite history writes; archive read+write rule |
-| M4 | Metadata + migration | `--print id` dedupe; v1 config + archive migration (D43) |
-| M5 | Update & packaging | NSIS + 1-click app update + tool updates in Settings; CI release on tag |
-| M6 | Polish | Keyboard shortcuts, reduced motion, E2E checklist green |
+| M1 | Scaffold + shell | **Done** — Tauri 2 + React runs; top tabs; Cascadia bundled; palette tokens; strict CSP; typed IPC ping |
+| M2 | Binary manager | **Done** — first-run wizard installs + sha256-verifies yt-dlp/FFmpeg; ETag check; atomic swap update |
+| M3 | Queue parity | **Done** — §5 engine + composer + queue table (accent bars, sort menu, lifecycle, expandable output, hover card); SQLite history writes; archive read+write rule |
+| M4 | Metadata + migration | **Done** — `--print id` dedupe; v1 config + archive migration (D43) |
+| M5 | Update & packaging | **Done** — NSIS + 1-click app update + tool updates in Settings; CI release on tag |
+| M6 | Polish | **Done** — keyboard shortcuts, reduced motion, E2E checklist green |
+| M7 | First real install | **Done** — engine truth (D61–D65), installer & lifecycle (D66–D69), app-owned dialogs (D70), design pass (D71–D72); live-verified installer upgrade/uninstall + e2e suite (`docs/M7_PLAN.md`) |
 
 Order note: M3 engine work (process wrapper, parser, args) can start in parallel
 with M2 — they are independent.
