@@ -38,6 +38,19 @@ nsis installer, signs the updater artifacts with the repo's minisign key, and
 attaches `latest.json` to the github release — the in-app updater polls that
 file (launch + 6 h) and verifies signatures before installing (D56).
 
+**alpha-testing the updater:** the updater's endpoint resolves via github's
+`releases/latest` URL, which only ever points at a **non-prerelease** release.
+ci publishes every tag as a prerelease (safe default), so after tagging an
+alpha meant for real update testing, run:
+
+```
+gh release edit v2.0.0-alpha.N --prerelease=false --latest
+```
+
+until then the app shows "update check failed: could not fetch a valid release
+json" — that is the endpoint 404ing, not a broken pipeline. older alphas that
+never became "latest" simply never receive update offers (by design).
+
 ci (`.github/workflows/ci.yml`) runs the same gates as the local `## checks` on
 every push and pr.
 
