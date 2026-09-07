@@ -283,7 +283,11 @@ function Row({ job, index }: { job: Job; index: number }) {
             onClick={() => toggleExpanded(job.id)}
             style={{ cursor: "pointer" }}
           >
-            {job.title ?? `fetching… ${job.url}`}
+            {job.state === "fetching" && !job.title
+              ? // d85: a STATE, not a name — only while actually fetching;
+                // afterwards the url is the honest fallback
+                "fetching…"
+              : job.title || job.url}
           </div>
           <div className="t-meta">
             {job.error ?? (job.skipped ? "already downloaded — skipped" : job.url)}
@@ -372,14 +376,31 @@ export default function QueueTable() {
                 jobs.filter((j) => j.state === "done").map((j) => useQueue.getState().remove(j.id)),
               )
             }
+            disabled={!jobs.some((j) => j.state === "done")}
           >
             clear done
+          </button>
+          {/* d85: failures and stops accumulate — one click clears every
+              removable row (queued included; active downloads are refused by
+              the engine, matched by the filter below) */}
+          <button
+            className="btn sm ghost"
+            onClick={() =>
+              void Promise.allSettled(
+                jobs
+                  .filter((j) => j.state !== "downloading" && j.state !== "post")
+                  .map((j) => useQueue.getState().remove(j.id)),
+              ).then(() => useQueue.getState().load())
+            }
+            disabled={jobs.length === 0}
+          >
+            clear all
           </button>
           <span className="grow" />
           <div style={{ position: "relative" }}>
             <button className="btn sm ghost" onClick={() => setMenuOpen((v) => !v)}>
               sort: {SORT_LABELS[sortKey]}{" "}
-              {sortKey === "_order" ? "▾" : sortDir === "asc" ? "↑" : "↓"}
+              {sortKey === "_order" ? (sortDir === "asc" ? "newest ↑" : "oldest ↓") : sortDir === "asc" ? "↑" : "↓"}
             </button>
             {menuOpen && (
               <div
@@ -438,7 +459,10 @@ export default function QueueTable() {
             </colgroup>
             <thead>
               <tr>
-                <th onClick={() => cycleSort("_order")}>#</th>
+                <th title="queue order — click to flip newest/oldest" onClick={() => cycleSort("_order")}>
+                  #
+                  {sortKey === "_order" && <span className="dir">{sortDir === "asc" ? "▼" : "▲"}</span>}
+                </th>
                 <th onClick={() => cycleSort("title")}>
                   item
                   {sortKey === "title" && <span className="dir">{sortDir === "asc" ? "▲" : "▼"}</span>}

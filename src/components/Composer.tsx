@@ -56,6 +56,17 @@ export default function Composer() {
   } | null>(null);
   const [copied, setCopied] = useState(false);
 
+  // d85 — the home destination is a home setting: once the user edits it
+  // (or picks via browse), it saves to settings immediately, so reloads,
+  // re-downloads (D19) and the settings page all agree. the pre-edit
+  // adoption from settings stays one-way (this field may still follow the
+  // setting until first touched).
+  const saveDest = (v: string) => {
+    setDestTouched(true);
+    setDest(v);
+    void useSettings.getState().update({ destination: v.trim() ? v : null });
+  };
+
   const [opts, setOpts] = useState<JobOptions>({ ...defaultOptions(), cookies: { kind: "none", browser: null, file: null } });
 
   const patch = (p: Partial<JobOptions>) =>
@@ -218,16 +229,13 @@ export default function Composer() {
               className="grow"
               value={dest}
               placeholder="windows downloads folder (default set in settings)"
-              onChange={(e) => {
-                setDestTouched(true);
-                setDest(e.target.value);
-              }}
+              onChange={(e) => saveDest(e.target.value)}
             />
             <button
               className="btn sm"
               onClick={async () => {
                 const picked = await pickFolder(dest);
-                if (picked) setDest(picked);
+                if (picked) saveDest(picked);
               }}
             >
               …

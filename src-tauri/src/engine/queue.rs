@@ -739,6 +739,12 @@ impl JobQueue {
                 row.updated_at = crate::store::now_unix();
                 self.save_row(&row);
                 self.emit_update(&row);
+                // d85: finalize() fires queue:changed but the done path didn't
+                // — a frontend that missed the job:update burst (laptop sleep,
+                // webview stall) kept a stale "fetching" row forever, because
+                // nothing ever asked it to re-pull. same belt-and-braces as
+                // the other terminal paths.
+                self.emit_queue_changed();
             }
         }
         self.cleanup_running(&id, &url, identity_key.as_deref());

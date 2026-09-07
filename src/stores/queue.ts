@@ -22,10 +22,10 @@ export type SortKey = "_order" | "title" | "format" | "status" | "pct" | "speed"
 export type SortDir = "asc" | "desc";
 
 export const STATUS_ORDER: JobState[] = [
-  "fetching",
-  "queued",
   "downloading",
   "post",
+  "fetching",
+  "queued",
   "done",
   "stopped",
   "error",
@@ -107,7 +107,18 @@ export const useQueue = create<QueueState>((set, get) => ({
 
   sorted: () => {
     const { jobs, sortKey, sortDir } = get();
-    if (sortKey === "_order") return [...jobs].sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id));
+    // d85: _order is a REAL direction now — default newest-first (the fresh
+    // paste is the thing you're watching); the # header flips to oldest-first.
+    // active jobs stay pinned above finished ones in both.
+    if (sortKey === "_order") {
+      const mul = sortDir === "desc" ? -1 : 1;
+      return [...jobs].sort(
+        (a, b) =>
+          statusRank(a.state) - statusRank(b.state) || // active first, BOTH dirs
+          (b.createdAt - a.createdAt) * mul ||
+          b.id.localeCompare(a.id) * mul,
+      );
+    }
     return [...jobs]
       .map((j, i) => ({ j, i }))
       .sort((x, y) => {
@@ -119,15 +130,18 @@ export const useQueue = create<QueueState>((set, get) => ({
   },
 
   setSort: (key, dir = "asc") => set({ sortKey: key, sortDir: dir }),
-  /** header click cycle: asc → desc → default (§6) */
+  /** header click cycle: asc → desc → default (§6). for _order the "default"
+   * IS a direction (newest-first), so the cycle is just a flip. */
   cycleSort: (key) => {
     const { sortKey, sortDir } = get();
     if (sortKey !== key) {
-      set({ sortKey: key, sortDir: "asc" });
+      set({ sortKey: key, sortDir: key === "_order" ? "desc" : "asc" });
+    } else if (sortKey === "_order") {
+      set({ sortDir: sortDir === "desc" ? "asc" : "desc" });
     } else if (sortDir === "asc") {
       set({ sortKey: key, sortDir: "desc" });
     } else {
-      set({ sortKey: "_order", sortDir: "asc" });
+      set({ sortKey: "_order", sortDir: "desc" });
     }
   },
 
@@ -248,7 +262,13 @@ export const useEngineCounts = create<EngineStore>((set) => ({
 }));
 
 export async function attachEngineCounts(): Promise<UnlistenFn> {
-  return listen<{ active: number; queued: number }>("queue:changed", (e) =>
-    useEngineCounts.getState().setCounts(e.payload),
-  );
+  return listen<{ active: number; queued: number }>("queue:changed", (e) => {
+    useEngineCounts.getState().setCounts(e.payload);
+    // d85: the tab-bar counter was the only consumer — but the engine fires
+    // this on every state change INCLUDING terminal ones, so it doubles as a
+    // guaranteed re-pull: a webview that slept through a job:update burst
+    // (laptop sleep, renderer stall) still converges to the truth instead of
+    // holding a stale "fetching" row forever.
+    void useQueue.getState().load();
+  });
 }
