@@ -498,8 +498,8 @@ S[12] = async () => {
   await sleep(300);
   const logLines = await evalAsync(ws, `(() => { const r = [...document.querySelectorAll('tr.qrow')].find(x => x.querySelector('.t-meta')?.textContent.includes('this-track-does-not-exist-xyz')); return r && r.nextElementSibling?.classList.contains('log-row') ? r.nextElementSibling.querySelectorAll('.logwrap > div').length : 0; })()`);
   details.push(`expanded log lines: ${logLines}`);
-  // hover card
-  await evalAsync(ws, `(() => { const r = [...document.querySelectorAll('tr.qrow')].find(x => x.querySelector('.t-meta')?.textContent.includes('this-track-does-not-exist-xyz')); if (r) r.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })); return true; })()`);
+  // hover card — d84: the trigger is the text cell (td 2), not the whole row
+  await evalAsync(ws, `(() => { const r = [...document.querySelectorAll('tr.qrow')].find(x => x.querySelector('.t-meta')?.textContent.includes('this-track-does-not-exist-xyz')); if (r) r.querySelector('td:nth-child(2)')?.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })); return true; })()`);
   await sleep(900);
   const card = await evalAsync(ws, `window.__e2e.hoverCard()`);
   details.push(`hover card shows error: ${card ? JSON.stringify(card.slice(0, 160)) : "MISSING"}`);

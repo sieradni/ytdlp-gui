@@ -496,7 +496,17 @@ export default function Composer() {
                   value={opts.cookies.kind}
                   onChange={(e) =>
                     patch({
-                      cookies: { ...opts.cookies, kind: e.target.value as JobOptions["cookies"]["kind"] },
+                      cookies: {
+                        ...opts.cookies,
+                        kind: e.target.value as JobOptions["cookies"]["kind"],
+                        // d84: entering a mode must be complete — the browser
+                        // dropdown only sets its value on change, so switching
+                        // to "from browser…" used to leave browser=null: no
+                        // flag in the preview and none at run time
+                        ...(e.target.value === "frombrowser" && !opts.cookies.browser
+                          ? { browser: "firefox" }
+                          : {}),
+                      },
                     })
                   }
                 >

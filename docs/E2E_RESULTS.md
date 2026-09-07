@@ -4,12 +4,15 @@
 - driver: real app (debug build + vite dev server), driven over WebView2 remote debugging
   (real ipc, real yt-dlp processes, real network; state asserted via `invoke()` engine truth)
 - managed binaries: staged yt-dlp + btbN ffmpeg (copied into the e2e sandbox bin/)
-- results: 3/3 pass
+- results: 6/6 pass
 
 | # | scenario | result | evidence |
 |---|---|---|---|
-| 21 | archive→history backfill + idempotence (d64) | PASS | backfilled 0 → 1 (+1), rowsWithoutUrl=1, row.url=null<br>after cleanup: rowsBackfilled=0 (per-call count; 0 = idempotent) |
-| 22 | reset app data (d69): guarded wipe, bin kept, report matches disk | PASS | queue rows before: 9 (busy: 0)<br>busy-guard: n/a (queue idle)<br>report: jobs=9 history=2 settings=true archive=true customArchive=undefined<br>after: queue=0 history=0 settings.json=removed downloaded.txt=removed bin kept=true |
+| 12 | unavailable video error surface | PASS | error text: "ERROR: [soundcloud] forss/this-track-does-not-exist-xyz: Unable to download JSON metadata: HTTP Error 404: Not Found (caused by <HTTPError 404: Not Found>)"<br>expanded log lines: 2<br>hover card shows error: "fetching…sourcehttps://soundcloud.com/forss/this-track-does-not-exist-xyzstatuserror — ERROR: [soundcloud] forss/this-track-does-not-exist-xyz: Unable to downlo" |
+| 18 | re-download overwrite gate (D59) | PASS | mirror: audio/mp3, skip off<br>initial download: Tycho - A Walk [473865125].mp3<br>cancel: dialog=resolved-ok, hint=true, jobs queued=0<br>grant: dialog=resolved-ok<br>granted job: done<br>options.overwrite=true; file_exists ipc=true; file re-downloaded (mtime advanced): true |
+| 19 | queue-time overwrite gate (D59) | PASS | mirror: audio/mp3, skip off<br>initial download: Tycho - A Walk [473865125].mp3<br>cancel: dialog=resolved-ok, feedback=true, jobs queued=0<br>grant: dialog=resolved-ok<br>granted job: done<br>options.overwrite=true; file re-downloaded (mtime advanced): true |
+| 21 | archive→history backfill + idempotence (d64) | PASS | backfilled 0 → 1 (+1), rowsWithoutUrl=4, row.url=null<br>after cleanup: rowsBackfilled=0 (per-call count; 0 = idempotent) |
+| 22 | reset app data (d69): guarded wipe, bin kept, report matches disk | PASS | queue rows before: 4 (busy: 0)<br>busy-guard: n/a (queue idle)<br>report: jobs=4 history=5 settings=true archive=true customArchive=undefined<br>after: queue=0 history=0 settings.json=removed downloaded.txt=removed bin kept=true |
 | 23 | archive import merge/replace (d75) | PASS | merge: imported=2 archiveAdded=2 path=app-data<br>replace: archiveAdded=2; default-mode: imported=0 added=0<br>settings.archivePath=null |
 
 ## notes

@@ -12,7 +12,7 @@ use serde::Serialize;
 use tauri::Emitter;
 use tokio::sync::{mpsc, Mutex as TokioMutex};
 
-use crate::engine::args::{build_download_argv, JobOptions, PlaylistMode};
+use crate::engine::args::{build_download_argv, CookieKind, JobOptions, PlaylistMode};
 use crate::engine::parser::{parse_line, ParsedLine};
 use crate::engine::process;
 use crate::error::{other, AppResult};
@@ -1156,6 +1156,24 @@ async fn resolve_identity(
         argv.push("--playlist-items".into());
         argv.push("1".into());
     }
+    // d84: cookies apply to the identity probe too — a bot-gated url without
+    // cookies fails the FETCH with the auth wall before the download (which
+    // would have carried the flag) ever runs. same flags, same source.
+    match opts.cookies.kind {
+        CookieKind::FromBrowser => {
+            if let Some(browser) = opts.cookies.browser.as_deref() {
+                argv.push("--cookies-from-browser".into());
+                argv.push(browser.to_owned());
+            }
+        }
+        CookieKind::File => {
+            if let Some(file) = opts.cookies.file.as_deref() {
+                argv.push("--cookies".into());
+                argv.push(file.to_owned());
+            }
+        }
+        CookieKind::None => {}
+    }
     argv.push(url.to_owned());
 
     let mut child = process::spawn(&argv)?;
@@ -1288,13 +1306,15 @@ fn rewrite_skip_existing_error(msg: &str) -> String {
 
 /// d60: youtube's bot-gate reads like an app failure ("ERROR: [youtube] …:
 /// Sign in to confirm you're not a bot") — it is an auth wall, and the fix
-/// already exists in the ui (composer → advanced → cookies). append that
-/// pointer instead of leaving the user with an undiagnosable dead end.
+/// already exists in the ui (composer → advanced → cookies). the guidance
+/// LEADS (d84): the t-meta row ellipsizes, so anything appended after
+/// yt-dlp's multi-sentence error is truncated away — the user must see the
+/// action first, raw yt-dlp text in the expando.
 fn rewrite_botgate_error(msg: &str) -> String {
     let lower = msg.to_lowercase();
     if lower.contains("sign in to confirm") || lower.contains("confirm you're not a bot") {
         format!(
-            "{msg} — youtube is asking this machine to sign in: set cookies (composer → advanced → cookies → from browser) and re-queue"
+            "youtube wants a sign-in for this video — set cookies (composer → advanced → cookies → from browser) and queue again · {msg}"
         )
     } else {
         msg.to_owned()
@@ -1305,7 +1325,8 @@ fn rewrite_botgate_error(msg: &str) -> String {
 /// likely dead end after a bot-gate (chrome ≥127 app-bound encryption on
 /// windows cannot be decrypted by yt-dlp). live-verified message on this
 /// machine: "ERROR: Failed to decrypt with DPAPI. See <yt-dlp issue 10927>".
-/// rewrite it into the actual guidance instead of a crypto error.
+/// rewrite it into the actual guidance instead of a crypto error — leading
+/// (d84), for the same truncation reason as the bot-gate rewrite.
 fn rewrite_cookie_error(msg: &str) -> String {
     let lower = msg.to_lowercase();
     if lower.contains("failed to decrypt with dpapi")
@@ -1313,7 +1334,7 @@ fn rewrite_cookie_error(msg: &str) -> String {
         || (lower.contains("cookies") && lower.contains("could not be decrypted"))
     {
         format!(
-            "{msg} — this browser's cookie store could not be decrypted (chrome ≥127 encrypts them in a way yt-dlp cannot read). use firefox or edge as the cookie source (composer → advanced → cookies), or export a cookies.txt file"
+            "this browser's cookie store could not be decrypted (chrome ≥127 encrypts them in a way yt-dlp cannot read) — use firefox or edge as the cookie source (composer → advanced → cookies), or export a cookies.txt file · {msg}"
         )
     } else {
         msg.to_owned()
@@ -1337,11 +1358,14 @@ mod tests {
     }
 
     #[test]
-    fn botgate_rewrite_appends_the_cookies_pointer() {
+    fn botgate_rewrite_leads_with_the_fix() {
         let real = "ERROR: [youtube] jNQXAC9IVRw: Sign in to confirm you're not a bot. Use --cookies-from-browser or --cookies for the authentication.";
         let out = rewrite_botgate_error(real);
-        assert!(out.starts_with(real));
+        // d84: guidance FIRST — the t-meta row ellipsizes, so a trailing fix
+        // after yt-dlp's wall of text never survives on screen
+        assert!(out.starts_with("youtube wants a sign-in"));
         assert!(out.contains("advanced → cookies → from browser"));
+        assert!(out.ends_with(real));
         // non-auth errors stay untouched
         let other = "ERROR: [generic] x: Unable to download webpage";
         assert_eq!(rewrite_botgate_error(other), other);
@@ -1353,8 +1377,9 @@ mod tests {
         // (2026-09): the app-bound encryption failure yt-dlp cannot bypass.
         let real = "ERROR: Failed to decrypt with DPAPI. See  https://github.com/yt-dlp/yt-dlp/issues/10927  for more info";
         let out = rewrite_cookie_error(real);
-        assert!(out.starts_with(real));
+        assert!(out.starts_with("this browser's cookie store could not be decrypted"));
         assert!(out.contains("firefox or edge"));
+        assert!(out.ends_with(real));
         // the yt-dlp in-decryption warning variant matches too
         let warn = "ERROR: failed to decrypt cookie (AES-GCM) because the MAC check failed. Possibly the key is wrong?";
         assert!(rewrite_cookie_error(warn).contains("firefox or edge"));

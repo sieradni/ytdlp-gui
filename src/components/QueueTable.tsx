@@ -241,16 +241,19 @@ function Row({ job, index }: { job: Job; index: number }) {
   };
   const onRowEnter = () => {
     clearTimers();
+    // d84: 700 ms dwell — 350 ms fired on drive-by pointer crossings; you
+    // should have to mean it. grace 450 ms: the walk to the card shouldn't
+    // lose it, but leaving the row entirely should dismiss briskly.
     dwellTimer.current = setTimeout(() => {
       if (rowRef.current) setHoverJob(job);
-    }, 350);
+    }, 700);
   };
   const onRowLeave = () => {
     if (dwellTimer.current) clearTimeout(dwellTimer.current);
     dwellTimer.current = null;
     graceTimer.current = setTimeout(() => {
       if (!cardIntent.current) setHoverJob(null);
-    }, 300);
+    }, 450);
   };
   const onCardIntent = (inside: boolean) => {
     cardIntent.current = inside;
@@ -269,11 +272,12 @@ function Row({ job, index }: { job: Job; index: number }) {
         className="qrow"
         data-status={job.state}
         data-flash={doneFlash ? "done" : undefined}
-        onMouseEnter={onRowEnter}
-        onMouseLeave={onRowLeave}
       >
         <td className="idx">{index + 1}</td>
-        <td>
+        <td
+          onMouseEnter={onRowEnter}
+          onMouseLeave={onRowLeave}
+        >
           <div
             className="t-title"
             onClick={() => toggleExpanded(job.id)}
