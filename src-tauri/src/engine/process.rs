@@ -47,9 +47,23 @@ pub fn spawn(argv: &[String]) -> std::io::Result<Child> {
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     no_window(&mut cmd);
+    apply_utf8_stdio(&mut cmd);
     Ok(Child {
         inner: cmd.spawn()?,
     })
+}
+
+/// d86: force the child's stdio to utf-8. yt-dlp is a python program; on
+/// windows its stdout/stderr default to the legacy console codepage (cp1252
+/// here), and TWO live-verified failures follow: (1) unicode titles cannot
+/// pass the pipe at all — a Japanese-titled video's `Destination:` line made
+/// python abort the whole download with `OSError: [Errno 22] Invalid
+/// argument` (reproduced 2026-09); (2) bot-gate errors carried a cp1252
+/// apostrophe that the old reader dropped. UTF-8 mode on the same machine
+/// and video downloads clean. (pipes are byte streams on our side; the d83
+/// pump decodes lossily regardless — this makes the BYTES correct.)
+fn apply_utf8_stdio(cmd: &mut Command) {
+    cmd.env("PYTHONUTF8", "1").env("PYTHONIOENCODING", "utf-8");
 }
 
 /// d83: one split-at-newline UTF-8 loop with a lossy flush of the trailing

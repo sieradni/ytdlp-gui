@@ -634,6 +634,14 @@ impl JobQueue {
                 // history write, so a completed download can never land as a
                 // metadata-less ghost row.
                 let is_playlist = identity.as_ref().is_some_and(|i| i.is_playlist);
+                // d86: the printed after_move:filepath goes through the
+                // child's stdio — before utf-8 mode it could not carry
+                // non-ascii and delivered mangled text (the filename on disk
+                // was always correct; windows file APIs are wide). a mangled
+                // "final" path pointing at nothing is worse than none, so
+                // verify the print against the filesystem; the id-marker
+                // recovery scan below still applies to single videos.
+                let final_path = final_path.filter(|p| std::path::Path::new(p).exists());
                 let final_path = if is_playlist || final_path.is_some() {
                     final_path
                 } else {

@@ -26,7 +26,7 @@ cargo fmt --check --manifest-path src-tauri/Cargo.toml
 
 m1 scaffold+shell · m2 binary manager · m3 queue parity · m4 metadata+migration ·
 m5 update+packaging · m6 polish · m7 "first real install" (engine truth, installer
-& lifecycle, app-owned dialogs, design pass — D61–D85) — full plan in
+& lifecycle, app-owned dialogs, design pass — D61–D86) — full plan in
 `docs/V2_DESIGN.md` (§12).
 
 v1 (`gui.py`) stays untouched until v2 reaches feature parity (D32).

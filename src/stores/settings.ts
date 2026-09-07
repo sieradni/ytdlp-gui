@@ -11,6 +11,7 @@ interface SettingsState {
 }
 
 const DEFAULTS: Settings = {
+  composeOpts: null,
   wizardDismissed: false,
   destination: null,
   concurrency: null,

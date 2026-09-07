@@ -68,21 +68,51 @@ export default function Composer() {
   };
 
   const [opts, setOpts] = useState<JobOptions>({ ...defaultOptions(), cookies: { kind: "none", browser: null, file: null } });
+  const settingsLoaded = useSettings((s) => s.loaded);
 
   const patch = (p: Partial<JobOptions>) =>
     setOpts((o) => {
       const next = { ...o, ...p };
       currentOptions = next; // keep the D19 mirror in sync
       touched.current = true;
+      // d86: advanced options persist — a cookie source chosen once survives
+      // relaunch. overwrite is excluded (destructive, per-action by design).
+      const { overwrite: _ow, ...persist } = next;
+      void useSettings.getState().update({ composeOpts: persist as JobOptions });
       return next;
     });
 
+  // d86: seed the composer from persisted options once settings have
+  // loaded (they load async at app boot — seeding at mount would read
+  // defaults). priority: user's persisted compose options > one-shot v1
+  // migration > defaults. respects the touched latch.
+  const seededCompose = useRef(false);
+  useEffect(() => {
+    if (seededCompose.current || !settingsLoaded) return;
+    seededCompose.current = true;
+    const saved = useSettings.getState().settings.composeOpts;
+    if (saved && !touched.current) {
+      setOpts((o) => {
+        // saved never carries overwrite (stripped at persist time); re-add
+        // the live default so the shape stays a full JobOptions
+        const next: JobOptions = { ...o, ...saved, overwrite: o.overwrite };
+        currentOptions = next;
+        return next;
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settingsLoaded]);
+
   // §11 migration: once, on mount, adopt the migrated v1 composer defaults —
-  // but never after the user has touched a control this session.
+  // but never after the user has touched a control this session, and never
+  // over options the user persisted themselves (d86: those win — otherwise
+  // the migration would clobber saved cookies on every launch of a migrated
+  // profile).
   const touched = useRef(false);
   useEffect(() => {
     void migrationStatus().then((report) => {
       if (!report?.migratedOptions || touched.current) return;
+      if (useSettings.getState().settings.composeOpts) return;
       setOpts((o) => {
         const next = { ...o, ...report.migratedOptions! };
         currentOptions = next;

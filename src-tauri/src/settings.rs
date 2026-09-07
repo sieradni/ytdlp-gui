@@ -28,6 +28,14 @@ pub struct Settings {
     /// the v1 config (that would clobber post-migration v2 settings changes).
     #[serde(default)]
     pub migrated_from_v1: bool,
+    /// d86: the composer's advanced options persist across launches —
+    /// cookies (source + browser + file path), sponsorblock, subtitles,
+    /// extra args. D38 is amended: the COOKIE SOURCE is a preference; the
+    /// cookie CONTENTS still never touch disk (yt-dlp reads them from the
+    /// browser/file at run time). null = composer defaults. overwrite stays
+    /// per-action on purpose (destructive).
+    #[serde(default)]
+    pub compose_opts: Option<serde_json::Value>,
 }
 
 pub fn settings_path() -> PathBuf {

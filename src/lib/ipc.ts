@@ -83,6 +83,9 @@ export interface Settings {
   archivePath: string | null;
   /** one-shot v1 migration marker (D55) — must round-trip through saves */
   migratedFromV1: boolean;
+  /** d86: persisted composer advanced options (cookies, sponsorblock,
+   * subtitles, extra args) — opaque JobOptions subset; overwrite excluded. */
+  composeOpts: JobOptions | null;
 }
 
 export const settingsGet = () => invoke<Settings>("settings_get");
