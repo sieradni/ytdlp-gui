@@ -131,6 +131,7 @@ pub fn run() {
             commands::history::file_exists,
             commands::history::archive_reconcile,
             commands::history::archive_export,
+            commands::history::archive_remove,
             commands::app::app_reset_data,
             commands::app::e2e_artifacts_report,
             commands::app::e2e_artifacts_remove,

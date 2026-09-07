@@ -73,6 +73,14 @@ pub fn archive_reconcile(db: tauri::State<'_, Arc<Db>>) -> AppResult<ReconcileRe
     })
 }
 
+/// d87: delete entries from the app-owned archive. the ui calls it from a
+/// history row's ✕ with a confirm naming the entry; the row itself stays
+/// (it is download history, not the archive). returns lines removed.
+#[tauri::command]
+pub fn archive_remove(entries: Vec<(String, String)>) -> AppResult<usize> {
+    crate::store::archive_remove(&crate::store::default_archive_path(), &entries)
+}
+
 #[tauri::command]
 pub fn history_list(
     db: tauri::State<'_, Arc<Db>>,

@@ -263,6 +263,11 @@ export const archiveReconcile = () =>
 export const archiveExport = (dest: string) =>
   invoke<number>("archive_export", { dest });
 
+/** d87: delete entries from the app-owned archive (extractor, vid pairs).
+ * history rows are untouched. returns lines removed. */
+export const archiveRemove = (entries: [string, string][]) =>
+  invoke<number>("archive_remove", { entries });
+
 // ---------------------------------------------------------------------------
 // app paths + version (§7)
 // ---------------------------------------------------------------------------

@@ -5,6 +5,7 @@ import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
   appPaths,
   archiveExport,
+  archiveRemove,
   archiveReconcile,
   e2eArtifactsRemove,
   e2eArtifactsReport,
@@ -276,6 +277,15 @@ export default function HistoryPage() {
                       >
                         ↻
                       </button>
+                      {/* d87: remove the ARCHIVE entry — re-queueing will
+                          download again. history keeps the row. */}
+                      <button
+                        className="iconbtn"
+                        title="remove from archive — re-downloading this item will download it again; history keeps the entry"
+                        onClick={() => void removeFromArchive(row)}
+                      >
+                        ✕
+                      </button>
                     </td>
                   </tr>
                 );
@@ -377,5 +387,24 @@ export default function HistoryPage() {
         : `history is up to date — ${r.idsInArchive} archive entries known`,
     );
     await load(query || undefined);
+  }
+
+  // d87: remove this item from the app-owned archive — the next queue of
+  // the same url downloads again instead of skipping. the history row stays
+  // (it records that a download happened); only the skip-marker goes.
+  async function removeFromArchive(row: HistoryRow) {
+    const ok = await confirmDialog({
+      title: "remove from archive",
+      body: `“${row.title ?? `${row.extractor} ${row.vid}`}” will be removed from the download archive.\n\nQueuing this item again will download it again. The history entry stays. The existing file on disk is not touched.`,
+      confirmLabel: "remove",
+      cancelLabel: "cancel",
+    });
+    if (!ok) return;
+    const removed = await archiveRemove([[row.extractor, row.vid]]);
+    setImportMsg(
+      removed > 0
+        ? `removed from archive — queuing “${row.title ?? row.vid}” will download again`
+        : "entry was not in the archive (nothing removed)",
+    );
   }
 }

@@ -468,6 +468,44 @@ pub fn merge_into_archive(path: &std::path::Path, text: &str) -> AppResult<usize
     Ok(added)
 }
 
+/// d87: remove entries from the archive by (extractor, vid). atomic rewrite
+/// (tmp+rename) that preserves every non-matching line verbatim — comments
+/// and append-order included; nothing else in the file is touched. matching
+/// mirrors archive_contains: extractor case-insensitive, vid exact. returns
+/// the number of lines removed (0 = nothing matched, file untouched).
+pub fn archive_remove(path: &std::path::Path, entries: &[(String, String)]) -> AppResult<usize> {
+    use std::collections::HashSet;
+    let existing = std::fs::read_to_string(path).unwrap_or_default();
+    let targets: HashSet<(String, String)> = entries
+        .iter()
+        .map(|(e, v)| (e.to_ascii_lowercase(), v.trim().to_owned()))
+        .collect();
+    let mut out = String::with_capacity(existing.len());
+    let mut removed = 0usize;
+    for line in existing.lines() {
+        let drop_it = match line.trim().split_once(' ') {
+            Some((ex, vid)) => targets.contains(&(ex.to_ascii_lowercase(), vid.trim().to_owned())),
+            None => false,
+        };
+        if drop_it {
+            removed += 1;
+        } else {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    if removed == 0 {
+        return Ok(0);
+    }
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let tmp = path.with_extension("txt.tmp");
+    std::fs::write(&tmp, out)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(removed)
+}
+
 /// count parseable archive entries (the reconcile report's `ids_in_archive`).
 pub fn count_archive_ids(path: &std::path::Path) -> u64 {
     std::fs::read_to_string(path)
@@ -674,6 +712,40 @@ mod tests {
         std::fs::write(&p, "garbage\n").unwrap();
         assert!(!archive_contains(&p, "garbage", ""));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn archive_remove_drops_only_target_entries_d87() {
+        let dir = std::env::temp_dir().join(format!("yg-arch-rm-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("downloaded.txt");
+        std::fs::write(
+            &p,
+            "# hand-added header comment\nyoutube aBcD1234567\nsoundcloud track-1\nyoutube  zzz99999999\n\nyoutube aBcD1234567\n",
+        )
+        .unwrap();
+        // case-insensitive extractor, exact vid; the duplicate youtube line
+        // and the soundcloud line stay; comments/blank lines preserved
+        let n = archive_remove(&p, &[("YOUTUBE".into(), "aBcD1234567".into())]).unwrap();
+        assert_eq!(n, 2, "both youtube aBcD1234567 lines are removed");
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(text.contains("# hand-added header comment"));
+        assert!(text.contains("soundcloud track-1"));
+        assert!(
+            text.contains("youtube  zzz99999999"),
+            "other entries untouched"
+        );
+        assert!(!text.contains("aBcD1234567"));
+        // removing an absent entry: 0, file byte-identical
+        let before = std::fs::read_to_string(&p).unwrap();
+        let n2 = archive_remove(&p, &[("youtube".into(), "nope1234567".into())]).unwrap();
+        assert_eq!(n2, 0);
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), before);
+        // missing file is not an error
+        let n3 = archive_remove(&dir.join("nope.txt"), &[("youtube".into(), "x".into())]).unwrap();
+        assert_eq!(n3, 0);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
