@@ -46,6 +46,7 @@ export default function Composer() {
     const stored = settings.destination;
     if (!destTouched && stored && !dest) setDest(stored);
   }, [settings.destination, destTouched, dest]);
+
   const [advOpen, setAdvOpen] = useState(false);
   const [feedback, setFeedback] = useState<{
     queued: number;
@@ -79,6 +80,30 @@ export default function Composer() {
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // d83 — the queue click used to pay the d60 overwrite gate's probe latency
+  // inline (memo-cold single-video urls: a full yt-dlp round-trip, capped at
+  // 2.5 s), which read as “stuck input”. the probe is now pre-warmed as the
+  // user types (debounced 500 ms, memoized — a warm gate resolves in ~0 ms),
+  // and the click's own race cap drops 2500 → 1200 ms so a cold probe can
+  // never hold the click more than about a second. the engine still reports
+  // the truth per d28 when the gate races out.
+  const warmedUrls = useRef("");
+  useEffect(() => {
+    if (opts.playlistMode !== "single") return;
+    const t = setTimeout(() => {
+      const singles = urls
+        .split(/[\n,;]+/)
+        .map((l) => l.trim())
+        .filter(Boolean);
+      if (!singles.length) return;
+      const sig = singles.join("\n");
+      if (sig === warmedUrls.current) return; // already warm
+      warmedUrls.current = sig;
+      overwriteTargets(singles, true, opts.skipDownloaded).catch(() => {});
+    }, 500);
+    return () => clearTimeout(t);
+  }, [urls, opts.playlistMode, opts.skipDownloaded]);
 
   const urlCount = urls.split("\n").filter((l) => l.trim()).length;
   const note = opts.dlType === "audio" ? FORMAT_NOTES[opts.audioFormat] ?? "" : "";
@@ -115,7 +140,7 @@ export default function Composer() {
         // unguarded, the engine reports the real error per D28
         targets = await Promise.race([
           overwriteTargets(singles, true, opts.skipDownloaded).catch(() => []),
-          new Promise<Awaited<ReturnType<typeof overwriteTargets>>>((r) => setTimeout(() => r([]), 2500)),
+          new Promise<Awaited<ReturnType<typeof overwriteTargets>>>((r) => setTimeout(() => r([]), 1200)),
         ]);
       } catch {
         targets = []; // probe unavailable → queue unguarded (engine reports)

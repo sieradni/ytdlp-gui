@@ -3,7 +3,7 @@
 
 use std::process::Stdio;
 
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
 use crate::error::AppResult;
@@ -52,8 +52,57 @@ pub fn spawn(argv: &[String]) -> std::io::Result<Child> {
     })
 }
 
+/// d83: one split-at-newline UTF-8 loop with a lossy flush of the trailing
+/// partial. `AsyncBufReadExt::lines()` DROPS a line containing invalid utf-8
+/// (silently: the iteration just ends, mid-stream) — live-verified 2026-09:
+/// yt-dlp on windows writes bot-gate stderr in the console codepage, so the
+/// “you’re not a bot” ERROR (cp1252 0x92 apostrophe) made the whole identity
+/// probe look like “no output from yt-dlp”. lossy-decoding that byte to U+FFFD
+/// keeps the line — and every `ERROR:`-prefixed diagnosis — reachable.
+async fn pump<R: tokio::io::AsyncRead + Unpin>(
+    mut rdr: R,
+    tx: tokio::sync::mpsc::UnboundedSender<(bool, String)>,
+    stdout: bool,
+) {
+    let mut buf: Vec<u8> = Vec::with_capacity(8 * 1024);
+    let mut chunk = [0u8; 4096];
+    loop {
+        match rdr.read(&mut chunk).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                buf.extend_from_slice(&chunk[..n]);
+                while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+                    let mut line: Vec<u8> = buf.drain(..pos + 1).collect();
+                    if line.ends_with(b"\n") {
+                        line.pop();
+                    }
+                    if line.ends_with(b"\r") {
+                        line.pop();
+                    }
+                    if tx
+                        .send((stdout, String::from_utf8_lossy(&line).into_owned()))
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            }
+        }
+    }
+    if !buf.is_empty() {
+        // final line without a newline (yt-dlp's progress carriage-return
+        // frames usually end in \r, but a truncated last line is possible)
+        let line = buf.trim_ascii_end();
+        if !line.is_empty() {
+            let _ = tx.send((stdout, String::from_utf8_lossy(line).into_owned()));
+        }
+    }
+}
+
 /// stream stdout and stderr lines over one channel; the bool marks stdout.
 /// yt-dlp writes errors to stderr, so both feed the expando row.
+/// d83: invalid-utf-8 lines are lossy-decoded (U+FFFD), never dropped —
+/// see `pump`.
 pub fn stream_lines(
     child: &mut Child,
 ) -> AppResult<tokio::sync::mpsc::UnboundedReceiver<(bool, String)>> {
@@ -70,24 +119,8 @@ pub fn stream_lines(
         .take()
         .ok_or_else(|| crate::error::other("no stderr"))?;
 
-    let tx_out = tx.clone();
-    tokio::spawn(async move {
-        let mut lines = BufReader::new(stdout).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            if tx_out.send((true, line)).is_err() {
-                break;
-            }
-        }
-    });
-
-    tokio::spawn(async move {
-        let mut lines = BufReader::new(stderr).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            if tx.send((false, line)).is_err() {
-                break;
-            }
-        }
-    });
+    tokio::spawn(pump(stdout, tx.clone(), true));
+    tokio::spawn(pump(stderr, tx, false));
 
     Ok(rx)
 }
@@ -124,6 +157,55 @@ mod tests {
         }
         assert_eq!(got.as_deref(), Some("hello"));
         let _ = child.kill().await;
+    }
+
+    /// d83: yt-dlp on windows writes stderr in the console codepage — the
+    /// live-captured bot-gate error carries cp1252 0x92 (“you’re”).
+    /// AsyncBufReadExt::lines() silently DROPS such a line, which made the
+    /// identity probe report “no output from yt-dlp”. the pump must lossy-
+    /// decode it (U+FFFD) and keep delivering the line.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn invalid_utf8_line_is_lossy_decoded_not_dropped() {
+        // write the byte directly so no shell quoting can re-encode it:
+        // "ERROR: [youtube] x: Sign in to confirm you<0x92>re not a bot"
+        let p = std::env::temp_dir().join(format!("ytdlp-d83-{}.bin", std::process::id()));
+        std::fs::write(
+            &p,
+            b"ERROR: [youtube] x: Sign in to confirm you\x92re not a bot\n",
+        )
+        .unwrap();
+        let argv = vec![
+            "powershell".to_owned(),
+            "-NoProfile".to_owned(),
+            "-Command".to_owned(),
+            format!(
+                "$s=[IO.File]::OpenRead('{}'); $e=[Console]::OpenStandardError(); $s.CopyTo($e); $s.Close()",
+                p.to_string_lossy().replace('\\', "/")
+            ),
+        ];
+        let mut child = spawn(&argv).unwrap();
+        let mut rx = stream_lines(&mut child).unwrap();
+        let mut got: Option<String> = None;
+        while got.is_none() {
+            match rx.recv().await {
+                Some((false, line)) => got = Some(line),
+                Some((true, _)) => continue,
+                None => break,
+            }
+        }
+        let _ = child.kill().await;
+        let _ = std::fs::remove_file(&p);
+        let line = got.expect("the ERROR line must survive invalid utf-8");
+        assert!(line.starts_with("ERROR:"), "got: {line}");
+        assert!(line.contains("Sign in to confirm you"), "got: {line}");
+        assert!(
+            line.contains('\u{FFFD}'),
+            "the cp1252 byte must appear as U+FFFD"
+        );
+        // everything after the bad byte survives too (the old lines() dropped
+        // the WHOLE line, losing the actionable tail)
+        assert!(line.ends_with("re not a bot"), "got: {line}");
     }
 
     #[tokio::test]
