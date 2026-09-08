@@ -5,8 +5,11 @@
 //! dom scraping; dom is only used to perform ui actions and verify ui-only
 //! surfaces (warnings, feedback, hover card, flash).
 //!
-//! usage: node scripts/e2e/run.js [--only 1,4,13] [--list]
-//! results are printed as a table and written to docs/E2E_RESULTS.md.
+//! usage: node scripts/e2e/run.cjs [--only 1,4,13] [--smoke] [--list]
+//! --only selects GROUPS (a group runs all its scenarios on a fresh
+//! sandbox — chains like s8←s11 are group-internal state); --smoke skips
+//! youtube-tagged scenarios (bot-gate). results print as a table and are
+//! written to docs/E2E_RESULTS.md.
 
 const fs = require("fs");
 const path = require("path");
@@ -30,19 +33,42 @@ async function evalAsync(ws, expr, retries = 5) {
 }
 
 const PORT = 9333;
-const EXE = path.resolve(__dirname, "../../src-tauri/target/debug/ytdlp-gui.exe");
-const DL_DIR = path.resolve(__dirname, "../../e2e-dl");
+const ROOT = path.resolve(__dirname, "../..");
+const EXE = path.resolve(ROOT, "src-tauri/target/debug/ytdlp-gui.exe");
 
-// d69: the suite runs the app against its own sandbox profile. the debug
-// build resolves app_data_dir() from YTDLP_GUI_DATA_DIR (see manager.rs), so
-// e2e rows/artifacts can never bleed into an installed app's profile again —
-// the alpha.2 campaign contamination was exactly that leak. the one exception
-// is bin/ provisioning below: the sandbox copies the staged managed binaries
-// out of the legacy profile on first run.
-process.env.YTDLP_GUI_DATA_DIR ||= path.join(require("os").tmpdir(), "ytdlp-gui-e2e");
-const DATA_DIR = process.env.YTDLP_GUI_DATA_DIR;
-const DATA_DIR_SQL = DATA_DIR.replace(/\\/g, "/"); // python -c paths want forward slashes
+// d91 harness redesign: PER-GROUP SANDBOXES. the suite's entire flake class
+// (leftover duplicate rows blocking d33, stale done jobs poisoning waitJob,
+// dialogs from earlier scenarios' files, persisted composeOpts leaking
+// across boundaries) came from one root cause: every scenario shared one
+// data dir + one destination, so each scenario had to defensively clean up
+// after every other. the redesign gives each *group* of scenarios a fresh
+// profile (YTDLP_GUI_DATA_DIR) and destination; scenarios inside a group
+// share state only where the test claim genuinely chains (s3→s2's archive
+// counter, s1→s4's archived duplicate, s6→s15's bbb, s18→s19's a-walk).
+// every group starts from a wiped sandbox + seeded settings + a fresh app
+// process — no scenario can see another group's leftovers, ever.
+//
+// the app resolves app_data_dir() from YTDLP_GUI_DATA_DIR (manager.rs), and
+// every store path funnels through it — the override is total.
+let DATA_DIR = ""; // reassigned per group before launch
+let DL_DIR = ""; // <repo>/e2e-dl/<group> — per group
+const DATA_DIR_SQL = () => DATA_DIR.replace(/\\/g, "/"); // python -c paths want forward slashes
 const LEGACY_PROFILE = process.env.APPDATA + "\\\\ytdlp-gui";
+
+// scenario groups: shared state ONLY where a claim genuinely chains.
+//   download-core — s1 downloads zoo; s4 re-queues it (archive skip); s3
+//     downloads tycho items 1-2; s2 re-runs the album (counter 10/10).
+//   intake-errors — no youtube; garbage/intranet/soundcloud/dead-url.
+//   options-contract — zoo-based webm/d19/relink + keyboard shortcuts.
+//   lifecycle — concurrency/stop/pause/restart on the big bbb job.
+//   gates-archive — bandcamp gates + archive import/reconcile + reset last.
+const GROUPS = [
+  { name: "download-core", scenarios: [1, 4, 3, 2] },
+  { name: "intake-errors", scenarios: [9, 10, 12] },
+  { name: "options-contract", scenarios: [11, 13, 14, 8, 7] },
+  { name: "lifecycle", scenarios: [5, 6, 15, 16] },
+  { name: "gates-archive", scenarios: [18, 19, 20, 21, 23, 22] },
+];
 
 // stable, live test targets (probed 2026-09 with the staged yt-dlp 2026.08.19)
 const ZOO = "https://www.youtube.com/watch?v=jNQXAC9IVRw"; // 19s, ~2MB
@@ -148,6 +174,69 @@ const BUNDLE = `(() => {
             if (t.checked !== partial.skipDownloaded) return 'skip-no-commit';
           }
         }
+        // d90: playlistMode / coverMode support — the mirror-verify promise
+        // ("fails fast instead of silently no-oping") must cover every field
+        // setOpts accepts, or a pin like s19's playlistMode=single is a silent
+        // lie (found live, d90-g round: s3's leak survived the "pin").
+        // overwrite deliberately has NO branch: the composer has no overwrite
+        // control (it is per-action only — the d60 dialog grant or history's
+        // ↻). a pin passing overwrite:true used to click toggle[1], which is
+        // the ADVANCED panel's autoCaptions checkbox — corrupting state.
+        if (partial.playlistMode !== undefined) {
+          const label = partial.playlistMode === 'single' ? 'single video only' : partial.playlistMode === 'all' ? 'entire playlist' : 'first n…';
+          const b = $$('.card .seg button').find((x) => x.textContent.trim() === label);
+          if (!b) return 'no-playlist-seg-' + partial.playlistMode;
+          if (!b.classList.contains('on')) {
+            b.click();
+            await zzz(200);
+            if (!b.classList.contains('on')) return 'playlistMode-no-commit';
+          }
+        }
+        if (partial.coverMode !== undefined) {
+          const sel = $$('.card select').find((s) => [...s.options].some((o) => ['square', 'original', 'custom', 'none'].includes(o.value)));
+          if (!sel) return 'no-cover-select';
+          if (sel.value !== partial.coverMode) {
+            const sp = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set;
+            sp.call(sel, partial.coverMode);
+            sel.dispatchEvent(new Event('change', { bubbles: true }));
+            await zzz(150);
+            if (sel.value !== partial.coverMode) return 'cover-no-commit';
+          }
+        }
+        // d84/d88: cookies live in the advanced panel — open it first
+        if (partial.cookies !== undefined) {
+          const advBtn = $$('button').find((b) => b.textContent.trim().startsWith('advanced'));
+          if (!advBtn) return 'no-advanced-btn';
+          // panel open? probe for the cookie select; click the toggle if not
+          let cookieSel = $$('.card select').find((s) => [...s.options].some((o) => o.value === 'frombrowser'));
+          if (!cookieSel) { advBtn.click(); await zzz(250); }
+          cookieSel = $$('.card select').find((s) => [...s.options].some((o) => o.value === 'frombrowser'));
+          if (!cookieSel) return 'no-cookie-select';
+          const want = partial.cookies;
+          const val = want.kind === 'frombrowser' ? 'frombrowser' : want.kind === 'file' ? 'file' : 'none';
+          if (cookieSel.value !== val) {
+            // react writes through the native setter — a plain .value
+            // assignment renders but never reaches state (verified live:
+            // the queued job then carried cookies=none, found 2026-09-06)
+            const sp = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set;
+            sp.call(cookieSel, val);
+            cookieSel.dispatchEvent(new Event('change', { bubbles: true }));
+            await zzz(200);
+            if (cookieSel.value !== val) return 'cookie-kind-no-commit';
+          }
+          if (val === 'frombrowser' && want.browser) {
+            const bsel = $$('.card select').find((s) => [...s.options].some((o) => ['firefox', 'chrome', 'edge', 'brave'].includes(o.value)));
+            if (!bsel) return 'no-browser-select';
+            // react writes through the native setter — a plain .value
+            // assignment renders but doesn't reach state (verified live:
+            // the preview never showed the flag without this)
+            const p = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set;
+            p.call(bsel, want.browser);
+            bsel.dispatchEvent(new Event('change', { bubbles: true }));
+            await zzz(200);
+            if (bsel.value !== want.browser) return 'browser-no-commit';
+          }
+        }
         return 'ok';
       } catch (e) { return 'applyOpts threw: ' + e.message; }
     },
@@ -218,6 +307,29 @@ async function waitJob(urlSub, state, timeoutMs = 60000, everyMs = 400, notAfter
  * event-synthesis gap. the textarea is CLEARED first — scenarios leave text
  * behind (s9 keeps the accepted intranet url by design; s10 appended to it
  * and fetched both). */
+/** queue via the composer and auto-answer the d60 dialog if it fires.
+ * scenarios that legitimately re-download onto an existing file (s11's
+ * container change, s15's re-queues, s16's relaunch re-queue) used to pass
+ * a bogus `overwrite: true` pin — the composer has no such control (it is
+ * per-action only), and the pin instead clicked the advanced panel's
+ * autoCaptions toggle (found live, d90-g round). the honest way: queue,
+ * then grant the dialog the engine logic would ask for. */
+async function queueViaComposerOverwrite(url) {
+  const t0 = Date.now();
+  await queueViaComposer(url);
+  const typed = Date.now();
+  // grant the d60 dialog only if it actually opened — a short presence poll,
+  // not answerDialog's full 8s timeout (no-dialog is the common case).
+  const opened = await evalUntil(`(() => document.querySelector('[data-testid="confirm-dialog"]') ? 'yes' : 'pending')()`, { timeoutMs: 4000, everyMs: 200, label: "d60 dialog" }).catch(() => "no");
+  if (opened === "yes") {
+    await evalAsync(ws, `(() => { const b = document.querySelector('[data-testid="confirm-dialog"] [data-dialog-action="confirm"]'); if (b) { b.click(); return 'ok'; } return 'no-btn'; })()`);
+    await sleep(300);
+  }
+  // d91 diagnostics: S15's BBB queue landed 139s after the click in one round
+  // — this stamps every phase so the stall is attributable from the log.
+  console.log(`    [qvc] ${url.slice(-24)} typed=${typed - t0}ms dialog=${opened} total=${Date.now() - t0}ms`);
+}
+
 async function queueViaComposer(url) {
   await evalAsync(ws, `(() => { const i = window.__e2e.composer(); if (!i) throw new Error('composer not found — wrong page?'); const p = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set; p.call(i, ''); i.dispatchEvent(new Event('input', { bubbles: true })); return true; })()`);
   await sleep(100);
@@ -230,7 +342,12 @@ async function queueViaComposer(url) {
     await evalAsync(ws, `(() => { const i = window.__e2e.composer(); if (!i) throw new Error('composer not found — wrong page?'); const p = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set; p.call(i, ${JSON.stringify(url)}); i.dispatchEvent(new Event('input', { bubbles: true })); return true; })()`);
     await sleep(120);
   }
-  await evalAsync(ws, `window.__e2e.clickText('.card button.primary', 'queue downloads', true)`);
+  // d91: the click MUST land — a silent false (button not found) turned S15's
+  // BBB queue into a no-op that looked like a 139s stall downstream. assert
+  // the click AND that the composer consumed the text (cleared on success,
+  // kept when the d60 gate holds it for the dialog).
+  const clicked = await evalAsync(ws, `window.__e2e.clickText('.card button.primary', 'queue downloads', true)`);
+  if (clicked !== true) throw new Error(`queue click never landed (button not found) for ${url.slice(-24)}`);
   await sleep(250);
 }
 
@@ -271,6 +388,18 @@ async function injectBundle() {
 async function ensureBundle() {
   const t = await evalAsync(ws, `typeof window.__e2e`);
   if (t !== "object") await injectBundle();
+}
+
+/** in-group d33 cleanup: remove terminal rows for a url so a later scenario
+ * in the SAME group can re-queue it. this is the one legitimate cross-
+ * scenario interaction left: s6's done bbb row owns its url, and s15/s16
+ * genuinely re-download it. terminal only — a running row must never be
+ * yanked (that is what stop is for). */
+async function clearTerminalJobs(urlSub) {
+  const rows = await jobs();
+  for (const j of rows.filter((x) => (x.url ?? "").includes(urlSub) && !["fetching", "downloading", "post", "queued"].includes(x.state))) {
+    await evalAsync(ws, `window.__e2e.ipc('job_remove', { id: ${JSON.stringify(j.id)} }).catch(() => {})`);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -330,6 +459,12 @@ S[1] = async () => {
     }
   })();
 
+  // the bot-gate: youtube walls cookieless fetches on this network
+  // (intermittent — some runs pass without). s6/s8 proved firefox cookies
+  // clear it; the suite's foundation download uses them too. this is
+  // authentication for the environment, not a change to the claim: s1 still
+  // tests app-defaults download behavior.
+  await setOpts({ cookies: { kind: "frombrowser", browser: "firefox", file: null } });
   await queueViaComposer(ZOO);
   const q = await waitJob("jNQXAC9IVRw", "fetching", 20000);
   details.push(`fetching observed (title=${q.title ?? "…"})`);
@@ -450,14 +585,26 @@ S[2] = async () => {
 // 9 — lenient intake: garbage rejected at intake, intranet accepted + errors at fetch
 S[9] = async () => {
   const details = [];
+  // stale-feedback trap (found live): the previous scenario's feedback card
+  // ("… 0 invalid") is still on screen, and any predicate matching the word
+  // "invalid" resolves instantly on it — before this scenario's click has
+  // even fired. clear the composer first, which also clears the feedback.
+  await evalAsync(ws, `window.__e2e.clearComposer()`);
+  await sleep(200);
+  // d33: a leftover intranet job from an earlier run would make this add a
+  // duplicate no-op — remove it first.
+  for (const j of await jobBy("192.168.1.1")) {
+    await evalAsync(ws, `window.__e2e.ipc('job_remove', { id: ${JSON.stringify(j.id)} })`);
+  }
   await evalAsync(ws, `window.__e2e.focusComposer()`);
   await ws.call("Input.insertText", { text: `${GARBAGE}\n${INTRANET}` });
   await sleep(150);
   await evalAsync(ws, `window.__e2e.clickText('.card button.primary', 'queue downloads', true)`);
   // the queue-time gate (D59) probes identity with a 2.5s cap before queueing
   // — poll for the feedback instead of a single-shot read (which predates the
-  // gate and read too early)
-  const fb = await evalUntil(`(() => { const t = window.__e2e.feedbackText(); return t && t.includes("invalid") ? t : "pending"; })()`, { timeoutMs: 10000, everyMs: 300, label: "intake feedback (s9)" }).catch(() => null);
+  // gate and read too early). the predicate must match THIS run's verdict
+  // ("1 invalid"), not just any feedback card.
+  const fb = await evalUntil(`(() => { const t = window.__e2e.feedbackText(); return t && t.includes("1 invalid") && t.includes(${JSON.stringify(GARBAGE)}) ? t : "pending"; })()`, { timeoutMs: 15000, everyMs: 300, label: "intake feedback (s9)" }).catch(() => null);
   details.push(`intake feedback: ${JSON.stringify(fb)}`);
   const textareaVal = await evalAsync(ws, `window.__e2e.composer()?.value ?? ''`);
   details.push(`textarea kept the accepted intranet url, dropped garbage: ${JSON.stringify(textareaVal)}`);
@@ -471,7 +618,22 @@ S[9] = async () => {
 // 10 — soundcloud single-format audio with -f ba/b fallback
 S[10] = async () => {
   const details = [];
+  // pin the composer state: the full suite's persisted composeOpts (d86)
+  // leak into un-setOpts'd scenarios — a leftover playlistMode/cookies/
+  // cover combo can stall the queue click on the d60 dialog (d90-final:
+  // the click landed, no job row appeared, and the dump showed a stale
+  // webm-thumbnail error row from the leaked state).
+  await setOpts({ dlType: "audio", audioFormat: "best", skipDownloaded: false, playlistMode: "single", coverMode: "none" });
+  details.push("mirror: audio/best, skip off, playlistMode=single, overwrite off, cover off");
   await queueViaComposer(SC_FLICKER);
+  // evidence on stall: if no job lands, was a d60 dialog holding the queue?
+  const stalled = await waitIpc("queue_list", (v) => v.some((j) => (j.url ?? "").includes("soundcloud.com/forss/flickermood")), { timeoutMs: 20000, everyMs: 300, label: "flickermood queued" }).then(() => false).catch(() => true);
+  if (stalled) {
+    const cdlg = await evalAsync(ws, `JSON.stringify(window.__cdlg ?? null)`);
+    const fb = await evalAsync(ws, `[...document.querySelectorAll('.card div')].map(h => h.textContent).filter(t => t.includes('queued') || t.includes('invalid') || t.includes('duplicate')).join(' | ') || 'none'`);
+    details.push(`stall evidence: cdlg=${cdlg} feedback=${JSON.stringify(fb)}`);
+    throw new Error("flickermood job never queued — evidence above");
+  }
   const done = await waitJob("soundcloud.com/forss/flickermood", "done", 120000, 500);
   details.push(`done: finalPath=${done.finalPath}`);
   const file = done.finalPath && fs.existsSync(done.finalPath);
@@ -515,11 +677,16 @@ S[11] = async () => {
   // rows behind, and the round-11 evidence line (.opus on the webm scenario)
   // proves the match was s1's stale job: a false pass. assert the scenario's
   // actual claim: a NEW job landing a .webm file.
-  await setOpts({ dlType: "video", container: "webm", skipDownloaded: false });
+  // overwrite on: the zoo .opus from s1/s8 exists in the destination, and
+  // the d60 dialog (which matches any * [<id>].*) would block the queue
+  // click — the scenario's claim is the webm container + its warning, and
+  // d89 reveals file-skips honestly rather than silently no-oping.
+  // cookies: youtube's bot-gate now bites plain video queues too (d90 round).
+  await setOpts({ dlType: "video", container: "webm", skipDownloaded: false, cookies: { kind: "frombrowser", browser: "firefox", file: null } });
   const priorIds = new Set((await jobBy("jNQXAC9IVRw")).map((j) => j.id));
   const warn = await evalUntil(`(() => window.__e2e.anyWarn('webm') ? 'yes' : 'pending')()`, { timeoutMs: 8000, label: "webm warning" });
   details.push(`webm warning visible before queueing: ${warn === "yes"}`);
-  await queueViaComposer(ZOO);
+  await queueViaComposerOverwrite(ZOO);
   const doneList = await waitIpc("queue_list", (v) => v.some((j) => j.url.includes("jNQXAC9IVRw") && !priorIds.has(j.id) && j.state === "done" && (j.finalPath ?? "").endsWith(".webm") && !(j.error ?? "")), { timeoutMs: 90000, everyMs: 500, label: "new .webm done" });
   const doneJob = doneList.find((j) => j.url.includes("jNQXAC9IVRw") && !priorIds.has(j.id) && (j.finalPath ?? "").endsWith(".webm"));
   details.push(`done: finalPath=${doneJob.finalPath}`);
@@ -534,15 +701,26 @@ S[11] = async () => {
 // the newline — the runner mistook harness physics for an app defect.
 S[13] = async () => {
   const details = [];
-  const before = (await jobs()).length;
+  // the url is unique per run on purpose: a reused url trips the
+  // one-job-per-url guard (d33 — found live: a leftover zoo job turned
+  // enter into an all-duplicates no-op) and a reused destination trips the
+  // d60 overwrite confirm nobody answers. the keyboard claim needs neither
+  // — example.com resolves as a direct media link and errors at fetch,
+  // which is fine: the claim is the keyboard contract, not the download.
+  const url = `https://example.com/d58-${Date.now()}.mp4`;
   await evalAsync(ws, `window.__e2e.focusComposer()`);
-  await ws.call("Input.insertText", { text: ZOO });
+  await ws.call("Input.insertText", { text: url });
   await sleep(150);
   await pressKey(ws, { key: "Enter", code: "Enter", keyCode: 13, text: "\r" });
   await sleep(400);
-  const queuedJob = await waitJob("jNQXAC9IVRw", "done", 30000).catch(() => null);
-  const cleared = await evalAsync(ws, `window.__e2e.composer()?.value ?? 'x'`);
-  details.push(`enter queued a job (zoo, skip→instant): ${queuedJob ? "yes" : "no"}; textarea cleared: ${cleared === ""}`);
+  // the scenario's claim is the D58 KEYBOARD contract: enter queues + clears
+  // the textarea. what the engine then does with the url is its business.
+  const queuedJob = await waitIpc("queue_list", (v) => v.some((j) => j.url === url), { timeoutMs: 15000, everyMs: 300, label: "enter queued a job" }).catch(() => null);
+  // the clear can legitimately lag the queue: when the d60 gate's confirm
+  // fires (example.com can resolve as a direct link to an existing dest),
+  // the clear waits for the dialog answer. poll, don't snapshot (d90 round).
+  const cleared = await evalUntil(`(() => (window.__e2e.composer()?.value ?? 'x') === '' ? 'yes' : 'pending')()`, { timeoutMs: 8000, everyMs: 300, label: "textarea cleared" }).catch(() => "no");
+  details.push(`enter queued a job: ${queuedJob ? "yes" : "no"}; textarea cleared: ${cleared}`);
   // shift+enter: two lines, no queue
   const countAfterEnter = (await jobs()).length;
   await evalAsync(ws, `window.__e2e.focusComposer()`);
@@ -554,12 +732,13 @@ S[13] = async () => {
   const countAfterShift = (await jobs()).length;
   details.push(`shift+enter: value=${JSON.stringify(val)}; job count before/after: ${countAfterEnter}/${countAfterShift}`);
   await evalAsync(ws, `window.__e2e.clearComposer()`);
-  // cleanup: remove the instant-skip zoo job to keep the queue tidy
-  const zooJobs = await jobBy("jNQXAC9IVRw");
-  for (const j of zooJobs.filter((x) => x.state === "done")) {
+  // cleanup: the d58 job is a fetch-error by design — remove it so later
+  // scenarios see a tidy queue
+  const d58jobs = await jobBy(url);
+  for (const j of d58jobs) {
     await evalAsync(ws, `window.__e2e.ipc('job_remove', { id: ${JSON.stringify(j.id)} })`);
   }
-  record(13, "enter / shift+enter (D58)", !!(queuedJob && cleared === "" && countAfterEnter === countAfterShift && val.includes("\n")), details);
+  record(13, "enter / shift+enter (D58)", !!(queuedJob && cleared === "yes" && countAfterEnter === countAfterShift && val.includes("\n")), details);
 };
 
 // 14 — ctrl+v jumps home + focuses composer; F5 reloads history
@@ -631,7 +810,10 @@ S[8] = async () => {
     // unwind the whole attempt loop.
     let set = false;
     for (let r = 0; r < 3 && !set; r++) {
-      try { await setOpts({ dlType: "audio", audioFormat: "opus", skipDownloaded: false }); set = true; }
+      // d88: cookies are part of the D19 mirror now — without them the
+      // re-download dies at fetch on a bot-gated network before any
+      // options contract is exercised (found live, 2026-09-06).
+      try { await setOpts({ dlType: "audio", audioFormat: "opus", skipDownloaded: false, cookies: { kind: "frombrowser", browser: "firefox", file: null } }); set = true; }
       catch { await sleep(2500); await ensureBundle(); }
     }
     if (!set) { details.push(`attempt ${attempt}: composer never mounted for setOpts`); continue; }
@@ -673,7 +855,7 @@ S[8] = async () => {
     const zoo = q.filter((j) => j.url.includes("jNQXAC9IVRw")).map((j) => `${j.id.slice(-6)}=${j.state}${j.error ? " err=" + j.error.slice(0, 60) : ""}`);
     const hist = await history();
     const zooRows = hist.filter((h) => h.vid === "jNQXAC9IVRw").map((h) => `${h.finalPath?.split("\\").pop()} url=${h.url ? "yes" : "NO"}`);
-    throw new Error(`re-download never landed .opus in 3 attempts (attempts: ${attemptsLog.join("; ") || "none"}) || zooJobs=[${zoo.join(" | ")}] zooHistory=[${zooRows.join("; ")}]`);
+    throw new Error(`re-download never landed .opus in 3 attempts (attempts: ${attemptsLog.join("; ") || "none"}) || per-attempt: [${details.join(" ; ")}] || zooJobs=[${zoo.join(" | ")}] zooHistory=[${zooRows.join("; ")}]`);
   }
   details.push(`file exists: ${fs.existsSync(done.finalPath)}`);
   record(8, "D19 re-download uses composer options", !!(done && fs.existsSync(done.finalPath)), details);
@@ -778,8 +960,10 @@ S[5] = async () => {
   const details = [];
   // composer state is set, not inherited (see s4): video/480p + skip ON,
   // mirror-verified through applyOpts instead of trust-me dom pokes.
-  await setOpts({ dlType: "video", maxResolution: "480p", skipDownloaded: true });
-  details.push("video mode, 480p cap set, skip on");
+  // cookies: youtube's bot-gate bites cookieless queues on this network
+  // (d91 round: despacito errored at fetch) — same environment-auth as s1.
+  await setOpts({ dlType: "video", maxResolution: "480p", skipDownloaded: true, cookies: { kind: "frombrowser", browser: "firefox", file: null } });
+  details.push("video mode, 480p cap set, skip on, cookies=firefox");
   // job1 via composer (watch?v=)
   await queueViaComposer(DESPACITO_W);
   await waitJob("kJQP7kiw5Fk", "downloading", 45000, 400).catch(async () => {
@@ -807,14 +991,28 @@ S[5] = async () => {
 
 S[6] = async () => {
   const details = [];
-  // bbb at BEST: big/slow enough to stop mid-flight with certainty — 480p
-  // finished in ~4s at local disk speed, racing the stop click (round 3).
-  // stop is triggered by .part byte growth, not a timer.
-  await evalAsync(ws, `window.__e2e.clickText('.card .seg button', 'video', true)`);
-  await evalUntil(`(() => { const s = [...document.querySelectorAll('.card select')].find(x => [...x.options].some(o => o.value === '2160p')); if (!s) return 'false'; s.value = 'best'; s.dispatchEvent(new Event('change', { bubbles: true })); return s.value === 'best' ? 'ok' : 'false'; })()`, { label: "best res" });
-  await evalAsync(ws, `(() => { const t = window.__e2e.skipToggle(); if (t && t.checked) t.click(); return true; })()`); // skip off: re-download allowed
+  // bbb at 1080p: big/slow enough to stop mid-flight with certainty — 480p
+  // finished in ~4s at local disk speed, racing the stop click (round 3),
+  // while "best" pulled the 4k stream (~1.4gb per attempt) and ENOSPC'd a
+  // nearly-full disk into fake "Conversion failed!" postprocessing errors
+  // (d88 full-suite round 2026-09-07). stop is triggered by .part byte
+  // growth, not a timer, so the resolution only sets the window width.
+  // d84/d88: youtube's bot-gate comes and goes by ip — mirror-verified
+  // cookies-from-browser makes the scenario deterministic (live-verified
+  // 2026-09-06: the same url resolves with cookies, errors without).
+  // s6's stopped bbb row still owns the url (d33: one-job-per-url across
+  // ALL states — live-verified truth, d90 full round). s15 needs both
+  // slots, so clear the stopped row first (✕ keeps files + history).
+  // NOTE: must be an async IIFE — a bare `await` inside a plain eval
+  // expression is a SyntaxError that evalAsync retries then the .catch
+  // swallows (found live, d90-final round: the row survived, the duplicate
+  // came back).
+  await evalAsync(ws, `(async () => { const rows = await window.__e2e.ipc('queue_list'); const id = rows.find(j => (j.url ?? '').includes('aqz-KE-bpKQ') && ['stopped','error','done','duplicate'].includes(j.state))?.id; if (id) await window.__e2e.ipc('job_remove', { id }); return id ?? 'none'; })()`).catch(() => null);
+  await sleep(400);
+  await setOpts({ dlType: "video", maxResolution: "1080p", skipDownloaded: false, cookies: { kind: "frombrowser", browser: "firefox", file: null } });
+  details.push("mirror: video/1080p, skip off, cookies=firefox (stopped bbb row cleared)");
   const priorIds = new Set((await jobBy("aqz-KE-bpKQ")).map((j) => j.id));
-  await queueViaComposer(BBB);
+  await queueViaComposerOverwrite(BBB);
   await waitIpc("queue_list", (v) => v.some((j) => j.url.includes("aqz-KE-bpKQ") && !priorIds.has(j.id) && j.state === "downloading"), { timeoutMs: 90000, everyMs: 300, label: "bbb running" });
   // stop ■ once bytes actually flow (wide window — btbN best is hundreds of mb)
   const partsAt = () => fs.existsSync(DL_DIR) ? fs.readdirSync(DL_DIR).filter((f) => f.includes(".part")).map((f) => ({ f, s: fs.statSync(path.join(DL_DIR, f)).size })) : [];
@@ -830,7 +1028,7 @@ S[6] = async () => {
   const sizeAtStop = parts.reduce((a, p) => a + p.s, 0);
   // stopped rows carry the error string in meta, not the url — match by the
   // title cell, which the engine fills from the probe/download output
-  const retried = await evalUntil(`(() => { const r = [...document.querySelectorAll('tr.qrow')].find(x => x.dataset.status === 'stopped' && x.querySelector('.t-title')?.textContent.toLowerCase().includes('buck bunny')); if (!r) return 'false'; const b = [...r.querySelectorAll('button')].find(b => (b.title ?? '') === 'retry'); if (!b) return 'false'; b.click(); return 'ok'; })()`, { label: "retry click", timeoutMs: 20000 });
+  const retried = await evalUntil(`(() => { const r = [...document.querySelectorAll('tr.qrow')].find(x => x.dataset.status === 'stopped' && x.querySelector('.t-title')?.textContent.toLowerCase().includes('buck bunny')); if (!r) return 'false'; const b = [...r.querySelectorAll('button')].find(b => (b.title ?? '').startsWith('retry')); if (!b) return 'false'; b.click(); return 'ok'; })()`, { label: "retry click", timeoutMs: 20000 });
   details.push(`retry ↻ clicked: ${retried}`);
   let sizeAfterResume = 0;
   await waitIpc("queue_list", (v) => {
@@ -853,29 +1051,71 @@ S[6] = async () => {
 // honest "processes still alive" signal (e2e finding 2026-09-03).
 S[15] = async () => {
   const details = [];
-  // two best-quality jobs fill both slots (slow enough to survive the
-  // pause window); skip off so archived identities re-download. setOpts
+  // two 1080p jobs fill both slots (slow enough to survive the pause
+  // window, without the 4k disk footprint that enospc'd the d88 round);
+  // skip off so archived identities re-download. setOpts
   // verifies via the D19 mirror — a vite reload at the scenario boundary
   // reset the composer to audio defaults (round 5) and the 5MB .part gate
   // could never fire.
-  await setOpts({ dlType: "video", maxResolution: "best", skipDownloaded: false });
-  details.push("mirror: video/best, skip off");
+  // overwrite on (see s11): the zoo .opus exists; the witness must actually
+  // download after resume, not reveal a d89 skip. cookies: BOTH big jobs are
+  // youtube — the gate bit one mid-suite (d90 round) and running.length===2
+  // could never fire.
+  await setOpts({ dlType: "video", maxResolution: "1080p", skipDownloaded: false, cookies: { kind: "frombrowser", browser: "firefox", file: null } });
+  details.push("mirror: video/1080p, skip off");
+  // s6's terminal bbb/gangnam rows own their urls (d33); this scenario
+  // genuinely re-downloads both, so clear the terminal rows in-group.
+  await clearTerminalJobs("aqz-KE-bpKQ");
+  await clearTerminalJobs("9bZkp7q19f0");
+  // AND delete their finished files: without --force-overwrites yt-dlp skips
+  // an existing complete file ("has already been downloaded") — the job sits
+  // in `downloading` for its whole metadata phase with ZERO bytes, reports
+  // done@100, and the byte gate starves forever (found live, d91 solo round:
+  // both jobs 'downloading' 19-25s, parts=0mb the entire window, BBB done@100
+  // onto s6's leftover 156mb file). deleting the files makes both downloads
+  // real, which is what the d34 evidence needs.
   const priorGang = new Set((await jobBy("9bZkp7q19f0")).map((j) => j.id));
   const priorBbb = new Set((await jobBy("aqz-KE-bpKQ")).map((j) => j.id));
-  await queueViaComposer(GANGNAM);
-  await queueViaComposer(BBB);
-  await queueViaComposer(ZOO); // the queued witness
+  for (const vid of ["aqz-KE-bpKQ", "9bZkp7q19f0"]) {
+    for (const f of fs.existsSync(DL_DIR) ? fs.readdirSync(DL_DIR).filter((f) => f.includes(`[${vid}]`)) : []) {
+      fs.rmSync(path.join(DL_DIR, f), { force: true });
+    }
+  }
+  details.push("prior bbb/gangnam rows cleared + files deleted (no phantom skip)");
   const partsAt = () => fs.existsSync(DL_DIR) ? fs.readdirSync(DL_DIR).filter((f) => f.includes(".part")).map((f) => ({ f, s: fs.statSync(path.join(DL_DIR, f)).size })) : [];
   const sumAt = (list) => list.reduce((a, p) => a + p.s, 0);
-  // gate the pause on DISK TRUTH, not a state flag: both jobs downloading
-  // AND bytes flowing (≥5MB). a state-only gate can fire during yt-dlp's
-  // metadata phase — no bytes flow yet, so the 8s window shows 0→0 and
-  // "processes untouched" is unprovable (e2e round 4).
-  await waitIpc("queue_list", (v) => {
-    const running = v.filter((j) => ((j.url.includes("aqz-KE-bpKQ") && !priorBbb.has(j.id)) || (j.url.includes("9bZkp7q19f0") && !priorGang.has(j.id))) && j.state === "downloading");
-    return running.length === 2 && sumAt(partsAt()) >= 5 * 1024 * 1024;
-  }, { timeoutMs: 150000, everyMs: 500, label: "both big jobs running + bytes flowing" });
-  details.push("both big jobs downloading, .part bytes flowing");
+  // gate the pause on DISK TRUTH, not a state flag: the FIRST big job (bbb)
+  // must be downloading WITH bytes flowing. a state-only gate can fire during
+  // yt-dlp's metadata phase — no bytes flow yet, and the 8s window would show
+  // 0→0 (e2e round 4). d91 round 4 diagnosis: requiring BOTH big jobs to write
+  // can never fire — bbb's real transfer is ~4s (156mb at ~37mb/s) while
+  // gangnam's metadata phase runs ~13s, so their byte windows never align.
+  // gate on bbb writing alone: gangnam (queued 2nd) holds slot 2, so the
+  // witness stays queued — exactly the "no new dispatch while paused" moment.
+  // start the watcher BEFORE queuing: at 17 mb/s a 1080p job can finish inside
+  // the ~10s of mirror-verified setOpts + queueViaComposer round-trips, and a
+  // watcher that starts after dispatch never sees the window (d90-final).
+  const t15 = Date.now();
+  let lastSnap = "";
+  const bbbWriting = waitIpc("queue_list", (v) => {
+    const bbb = v.find((j) => j.url.includes("aqz-KE-bpKQ") && !priorBbb.has(j.id));
+    // d91 diagnostic: log state transitions only (not every poll) so the
+    // byte behavior stays observable without flooding the run log
+    const snap = v.filter((j) => (j.url.includes("aqz-KE-bpKQ") || j.url.includes("9bZkp7q19f0")) && !priorBbb.has(j.id) && !priorGang.has(j.id)).map((j) => `${j.url.slice(-14)}=${j.state}${j.pct != null ? "@" + j.pct.toFixed(0) : ""}`).join(" ") + ` | parts=${sumAt(partsAt()) >> 20}mb`;
+    if (snap && snap !== lastSnap) {
+      console.log(`    [s15-watch ${String(Math.round((Date.now() - t15) / 1000)).padStart(3)}s] ${snap}`);
+      lastSnap = snap;
+    }
+    return !!bbb && bbb.state === "downloading" && sumAt(partsAt()) >= 1 * 1024 * 1024;
+  }, { timeoutMs: 150000, everyMs: 300, label: "bbb downloading + bytes flowing" });
+  // queue order: bbb first (its transfer gates the pause), gangnam second
+  // (holds slot 2 so the witness can't dispatch), witness last (must still be
+  // 'queued' when the pause fires).
+  await queueViaComposerOverwrite(BBB);
+  await queueViaComposerOverwrite(GANGNAM);
+  await queueViaComposerOverwrite(ZOO); // the queued witness
+  await bbbWriting;
+  details.push("bbb downloading, .part bytes flowing, witness queued");
   // pause — direct ipc (queue_pause is an idempotent setter, safe to retry):
   // round 9 showed the dom button can be ABSENT right after a vite reload
   // (store unhydrated, loaded=false) while the engine + ipc work fine; and
@@ -908,9 +1148,15 @@ S[16] = async () => {
   const details = [];
   // a vite reload at the scenario boundary resets the composer to defaults
   // (skip ON) — round 5's re-queues were instantly archive-skipped. mirror-
-  // verified skip-off makes S16 self-sufficient.
-  await setOpts({ skipDownloaded: false });
-  details.push("mirror: skip off (reload resets composer defaults)");
+  // verified skip-off makes S16 self-sufficient. overwrite on: s15 may have
+  // completed the bbb final — without --force-overwrites yt-dlp's file-skip
+  // fires instantly and the kill has nothing running (the final-file check
+  // is independent of the archive toggle).
+  await setOpts({ skipDownloaded: false, cookies: { kind: "frombrowser", browser: "firefox", file: null } });
+  details.push("mirror: skip off, cookies=firefox (reload resets composer defaults)");
+  // s15 may have left terminal bbb rows owning the url (d33) — clear them so
+  // the re-queue below can actually run (in-group state, not a hack).
+  await clearTerminalJobs("aqz-KE-bpKQ");
   // ensure at least one job is still running right before the kill; if the
   // big jobs finished, re-queue BBB (skip is off — re-download ok)
   let running = (await jobs()).filter((j) => j.state === "downloading" || j.state === "post");
@@ -918,7 +1164,7 @@ S[16] = async () => {
     // transient youtube failures happen (round 4's re-queue died in fetch);
     // retry until a job actually reaches downloading
     for (let attempt = 0; attempt < 3 && running.length === 0; attempt++) {
-      await queueViaComposer(BBB);
+      await queueViaComposerOverwrite(BBB);
       try {
         running = await waitIpc("queue_list", (v) => v.some((j) => j.url.includes("aqz-KE-bpKQ") && j.state === "downloading"), { timeoutMs: 90000, everyMs: 300, label: `re-running BBB (attempt ${attempt + 1})` });
       } catch {
@@ -1068,7 +1314,7 @@ S[18] = async () => {
   let ow = "?";
   try {
     ow = require("child_process").execSync(
-      `python -c "import sqlite3,json;con=sqlite3.connect(r'${DATA_DIR_SQL}/history.db');r=con.execute('select options from jobs where id=?',('${j2.id}',)).fetchone();print(str(json.loads(r[0]).get('overwrite')).lower())"`,
+      `python -c "import sqlite3,json;con=sqlite3.connect(r'${DATA_DIR_SQL()}/history.db');r=con.execute('select options from jobs where id=?',('${j2.id}',)).fetchone();print(str(json.loads(r[0]).get('overwrite')).lower())"`,
       { encoding: "utf8" },
     ).trim();
   } catch { ow = "db-err"; }
@@ -1145,8 +1391,18 @@ S[19] = async () => {
   // (memoized D37 probe), finds an existing [id] file in the destination, and
   // presents the same dialog as history's gate — uniform D59 coverage.
   // playlists are excluded by design (the archive already dedupes them).
-  await setOpts({ dlType: "audio", audioFormat: "mp3", skipDownloaded: false });
-  details.push("mirror: audio/mp3, skip off");
+  // d86 persists composeOpts and s3's first-n leak (d90 full round) made the
+  // gate silently exclude itself — pin the mode back explicitly. overwrite
+  // must be pinned FALSE too: s18 runs immediately before and its dialog
+  // grants persist overwrite=true, which makes this gate skip itself the
+  // same way (found live, d90-final round).
+  await setOpts({ dlType: "audio", audioFormat: "mp3", skipDownloaded: false, playlistMode: "single" });
+  details.push("mirror: audio/mp3, skip off, playlistMode=single, overwrite off (s3/s18 leaks pinned)");
+  // warm the backend identity memo before the legs: s16 relaunches the app,
+  // so the memo is cold and a cold bandcamp probe (~1-2s) misses even the
+  // raised 2.5s dialog cap — the legs then assert a dialog that never opens.
+  // found in the d88 full-suite round (2026-09-07).
+  await evalAsync(ws, `window.__e2e.ipc('overwrite_targets', { urls: [${JSON.stringify(URL_)}], playlistSingle: true, skipDownloaded: false }).catch(() => [])`);
   // ensure a clean initial download exists (same pattern as s18)
   let prior = new Set((await jobs()).map((j) => j.id));
   let base = (await jobs()).find((j) => j.url.includes("tycho.bandcamp.com/track/a-walk") && j.state === "done" && !(j.error ?? ""));
@@ -1208,7 +1464,7 @@ S[19] = async () => {
   let ow = "?";
   try {
     ow = require("child_process").execSync(
-      `python -c "import sqlite3,json;con=sqlite3.connect(r'${DATA_DIR_SQL}/history.db');r=con.execute('select options from jobs where id=?',('${j2.id}',)).fetchone();print(str(json.loads(r[0]).get('overwrite')).lower())"`,
+      `python -c "import sqlite3,json;con=sqlite3.connect(r'${DATA_DIR_SQL()}/history.db');r=con.execute('select options from jobs where id=?',('${j2.id}',)).fetchone();print(str(json.loads(r[0]).get('overwrite')).lower())"`,
       { encoding: "utf8" },
     ).trim();
   } catch { ow = "db-err"; }
@@ -1217,25 +1473,24 @@ S[19] = async () => {
   record(19, "queue-time overwrite gate (D59)", !!(cancelOk && ansB === "resolved-ok" && j2.state === "done" && !(j2.error ?? "") && ow === "true" && mtime1 > mtime0), details);
 };
 
-/** wipe all persisted state except the staged managed binaries — every
- * runner invocation must start deterministic: a leftover zoo job makes d33
- * reject s1's queue as a duplicate, and a leftover second history row for
- * the same identity breaks s7's relink targeting (both found live, solo
- * chains reusing a dirty db). */
-function wipeState() {
-  if (fs.existsSync(DATA_DIR)) {
-    for (const f of fs.readdirSync(DATA_DIR)) {
+/** wipe one group's sandbox (all persisted state except the staged managed
+ * binaries). every group launch must start deterministic — this is the whole
+ * point of the d91 redesign: no group can see another group's leftovers. */
+function wipeState(dir) {
+  if (fs.existsSync(dir)) {
+    for (const f of fs.readdirSync(dir)) {
       if (f === "bin") continue;
-      fs.rmSync(path.join(DATA_DIR, f), { recursive: true, force: true });
+      fs.rmSync(path.join(dir, f), { recursive: true, force: true });
     }
   }
-  fs.rmSync(DL_DIR, { recursive: true, force: true });
+  const dl = path.join(ROOT, "e2e-dl");
+  fs.rmSync(dl, { recursive: true, force: true });
 
   // the sandbox has no bin/ — provision the staged managed binaries from the
   // legacy profile (exactly what the installer wizard would have placed).
   // settings.json is seeded AFTER this so a stale sandbox manifest.json is
   // left alone (the manager is its single writer).
-  const binDst = path.join(DATA_DIR, "bin");
+  const binDst = path.join(dir, "bin");
   if (!fs.existsSync(path.join(binDst, "yt-dlp.exe"))) {
     const binSrc = path.join(LEGACY_PROFILE, "bin");
     fs.mkdirSync(binDst, { recursive: true });
@@ -1251,11 +1506,16 @@ function wipeState() {
  * settings.json, the app booted its default destination, and s8's re-download
  * landed in ~/Music instead of the e2e dir, resurrecting the existing-target
  * error edge the scenario had already fixed). */
-function seedSettings() {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
+function seedSettings(dir) {
+  fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(
-    path.join(DATA_DIR, "settings.json"),
-    JSON.stringify({ destination: DL_DIR, concurrency: 2, wizardDismissed: true, migratedFromV1: true }, null, 2),
+    path.join(dir, "settings.json"),
+    // d86: composeOpts must seed EMPTY here — a leftover composeOpts from an
+    // earlier round (e.g. cookies=firefox from a manual probe) silently
+    // reseeds the composer every launch and makes "cookies off" scenarios
+    // nondeterministic (found live, 2026-09-06: S13 queued with the
+    // previous round's firefox cookies and hit a cookie decrypt error).
+    JSON.stringify({ destination: DL_DIR, concurrency: 2, wizardDismissed: true, migratedFromV1: true, composeOpts: null }, null, 2),
   );
 }
 
@@ -1279,14 +1539,26 @@ async function main() {
   const only = process.argv.includes("--only")
     ? process.argv[process.argv.indexOf("--only") + 1].split(",").map(Number)
     : null;
-  if (process.argv.includes("--fresh") || !only) wipeState();
-  let order = [1, 4, 3, 2, 9, 10, 12, 11, 13, 14, 8, 7, 5, 6, 15, 16, 18, 19, 20, 21, 22, 23];
+  let order = [1, 4, 3, 2, 9, 10, 12, 11, 13, 14, 8, 7, 5, 6, 15, 16, 18, 19, 20, 21, 23, 22];
   if (process.argv.includes("--smoke")) order = order.filter((n) => SOURCE[n] !== "youtube");
   const toRun = only ? order.filter((n) => only.includes(n)) : order;
   if (toRun.length === 0) {
     console.log("no scenarios selected" + (process.argv.includes("--smoke") ? " (smoke excludes youtube-tagged scenarios; youtube is bot-gating this machine?)" : ""));
     return;
   }
+
+  // d91: each selected scenario runs inside its GROUP, and a group runs its
+  // full scenario list (fresh sandbox). chains like s8 needing s11's zoo
+  // history row are group-internal state — running a lone member solo would
+  // break the chain, so --only selects GROUPS, not lone scenarios. use
+  // --smoke to skip the youtube-tagged ones.
+  const groupsToRun = GROUPS
+    .filter((g) => toRun.some((n) => g.scenarios.includes(n)))
+    .map((g) => ({
+      ...g,
+      scenarios: process.argv.includes("--smoke") ? g.scenarios.filter((n) => SOURCE[n] !== "youtube") : g.scenarios,
+    }))
+    .filter((g) => g.scenarios.length > 0);
 
   // the runner drives the app over cdp — a stale exe silently tests
   // yesterday's build (found live after a clippy-only compile). abort when
@@ -1309,28 +1581,9 @@ async function main() {
     }
   } catch { /* outside a git checkout or exe missing — launch will report */ }
 
-  console.log(`launching real app: ${EXE} (cdp :${PORT}, data: ${DATA_DIR})`);
-  seedSettings();
-  const { ws: socket } = await launchAndAttach(EXE, PORT);
-  ws = socket;
-  // page errors are evidence: surface the webview's console into the run log
-  socket.on("event", (m) => {
-    if (m.method === "Runtime.consoleAPICalled" && ["error", "warning"].includes(m.params.type)) {
-      console.error(`[page:${m.params.type}]`, (m.params.args ?? []).map((a) => a.value ?? a.description ?? "").join(" ").slice(0, 300));
-    }
-  });
-  await sleep(1200);
-  await injectBundle();
-  // wait for react hydration + the one late vite reload to settle before
-  // any ui interaction (the reload wipes injected bundles)
-  await waitFor(ws, "document.querySelectorAll('.tab-btn').length >= 3 && window.__TAURI_INTERNALS__ ? true : null", { timeoutMs: 60000, everyMs: 400 });
-  await injectBundle();
-  await sleep(4000);
-  await injectBundle();
-  console.log("attached. running scenarios:", toRun.join(", "));
-
-  for (const n of toRun) {
-    await scenario(n, SCEN_NAMES[n], S[n]);
+  console.log(`e2e groups: ${groupsToRun.map((g) => `${g.name}[${g.scenarios.join(",")}]`).join("  ")}`);
+  for (const g of groupsToRun) {
+    await runGroup(g);
   }
 
   // results table + doc
@@ -1343,6 +1596,45 @@ async function main() {
   // s16 leaves orphaned yt-dlp children (the app died, not them) — reap them
   try { require("child_process").execSync("taskkill /IM yt-dlp.exe /F", { stdio: "ignore" }); } catch { /* none running */ }
   process.exit(0);
+}
+
+/** run one scenario group: wipe its sandbox, seed settings, launch a fresh
+ * app, attach, then run the group's scenarios in order. the app is killed
+ * on group exit so the next group's launch is clean (no port/webview reuse). */
+async function runGroup(group) {
+  DATA_DIR = path.join(require("os").tmpdir(), `ytdlp-gui-e2e-${group.name}`);
+  DL_DIR = path.join(ROOT, "e2e-dl");
+  process.env.YTDLP_GUI_DATA_DIR = DATA_DIR; // launchAndAttach spreads process.env
+  console.log(`\n######## group ${group.name}: sandbox=${DATA_DIR} dest=${DL_DIR}`);
+  wipeState(DATA_DIR);
+  seedSettings(DATA_DIR);
+  const { ws: socket } = await launchAndAttach(EXE, PORT);
+  ws = socket;
+  // page errors are evidence: surface the webview's console into the run log
+  socket.on("event", (m) => {
+    if (m.method === "Runtime.consoleAPICalled" && ["error", "warning"].includes(m.params.type)) {
+      console.error(`[page:${m.params.type}]`, (m.params.args ?? []).map((a) => a.value ?? a.description ?? "").join(" ").slice(0, 300));
+    }
+  });
+  try {
+    await sleep(1200);
+    await injectBundle();
+    // wait for react hydration + the one late vite reload to settle before
+    // any ui interaction (the reload wipes injected bundles)
+    await waitFor(ws, "document.querySelectorAll('.tab-btn').length >= 3 && window.__TAURI_INTERNALS__ ? true : null", { timeoutMs: 60000, everyMs: 400 });
+    await injectBundle();
+    await sleep(4000);
+    await injectBundle();
+    console.log(`attached (${group.name}). running scenarios:`, group.scenarios.join(", "));
+    for (const n of group.scenarios) {
+      await scenario(n, SCEN_NAMES[n], S[n]);
+    }
+  } finally {
+    // s16 kills the app itself; a kill here is harmless then. always kill so
+    // the next group's port probe is clean.
+    try { require("child_process").execSync("taskkill /IM ytdlp-gui.exe /F", { stdio: "ignore" }); } catch { /* already gone */ }
+    await sleep(2000);
+  }
 }
 
 // 20 — archived-duplicate skip semantic, no youtube (d61 close-out):

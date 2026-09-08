@@ -5,15 +5,11 @@ import { useQueue } from "../stores/queue";
 import { useSettings } from "../stores/settings";
 import { migrationStatus, overwriteTargets, type AudioFormat, type JobOptions, type PlaylistMode } from "../lib/ipc";
 import { buildPreviewArgs, classifyPreviewArgv, displayArgv, type CmdToken } from "../lib/cmdPreview";
+// d88: the D19 mirror moved to its own module (history + the queue's retry
+// read it; importing a component for one variable dragged the composer into
+// every consumer's graph). this file keeps writing through setComposerOptions.
+import { setComposerOptions } from "../lib/composeMirror";
 import { defaultOptions } from "../lib/defaults";
-
-/**
- * the composer's live options, mirrored module-level so history's
- * re-download (D19: "what queue would do if I pasted this url now") can
- * reuse exactly what the user currently sees configured — not stored
- * per-history settings. falls back to defaults when home was never opened.
- */
-export let currentOptions: JobOptions = defaultOptions();
 
 const FORMAT_NOTES: Partial<Record<AudioFormat, string>> = {
   best: "",
@@ -70,17 +66,21 @@ export default function Composer() {
   const [opts, setOpts] = useState<JobOptions>({ ...defaultOptions(), cookies: { kind: "none", browser: null, file: null } });
   const settingsLoaded = useSettings((s) => s.loaded);
 
-  const patch = (p: Partial<JobOptions>) =>
-    setOpts((o) => {
-      const next = { ...o, ...p };
-      currentOptions = next; // keep the D19 mirror in sync
-      touched.current = true;
-      // d86: advanced options persist — a cookie source chosen once survives
-      // relaunch. overwrite is excluded (destructive, per-action by design).
-      const { overwrite: _ow, ...persist } = next;
-      void useSettings.getState().update({ composeOpts: persist as JobOptions });
-      return next;
-    });
+  const patch = (p: Partial<JobOptions>) => {
+    touched.current = true;
+    // event-handler-only helper: the closure `opts` is the committed state
+    // here, so a plain set is correct — and keeps every side effect (mirror
+    // write, settings persist) OUT of the state updater, which react runs
+    // during render ("cannot update a component while rendering a different
+    // component", caught live by the e2e run's console relay).
+    const next = { ...opts, ...p };
+    setOpts(next);
+    setComposerOptions(next); // keep the D19 mirror in sync
+    // d86: advanced options persist — a cookie source chosen once survives
+    // relaunch. overwrite is excluded (destructive, per-action by design).
+    const { overwrite: _ow, ...persist } = next;
+    void useSettings.getState().update({ composeOpts: persist as JobOptions });
+  };
 
   // d86: seed the composer from persisted options once settings have
   // loaded (they load async at app boot — seeding at mount would read
@@ -96,7 +96,7 @@ export default function Composer() {
         // saved never carries overwrite (stripped at persist time); re-add
         // the live default so the shape stays a full JobOptions
         const next: JobOptions = { ...o, ...saved, overwrite: o.overwrite };
-        currentOptions = next;
+        setComposerOptions(next);
         return next;
       });
     }
@@ -115,7 +115,7 @@ export default function Composer() {
       if (useSettings.getState().settings.composeOpts) return;
       setOpts((o) => {
         const next = { ...o, ...report.migratedOptions! };
-        currentOptions = next;
+        setComposerOptions(next);
         return next;
       });
     });
@@ -177,11 +177,13 @@ export default function Composer() {
       try {
         // the gate must never stall the queue click on a slow/unreachable
         // url (yt-dlp's generic extractor waits ~20s on a connect timeout):
-        // race the probe with a short cap — unresolvable-in-time = queue
-        // unguarded, the engine reports the real error per D28
+        // race the probe with a bounded cap — unresolvable-in-time = queue
+        // anyway. d89: the engine's pre-spawn gate is the race-free backstop,
+        // so a miss here lands as a clear refusal row, never a silent
+        // overwrite or a silent no-op skip.
         targets = await Promise.race([
           overwriteTargets(singles, true, opts.skipDownloaded).catch(() => []),
-          new Promise<Awaited<ReturnType<typeof overwriteTargets>>>((r) => setTimeout(() => r([]), 1200)),
+          new Promise<Awaited<ReturnType<typeof overwriteTargets>>>((r) => setTimeout(() => r([]), 2500)),
         ]);
       } catch {
         targets = []; // probe unavailable → queue unguarded (engine reports)
@@ -225,6 +227,9 @@ export default function Composer() {
   };
 
   const webmWarn = opts.dlType === "video" && opts.container === "webm";
+  // d88: wav can't hold embedded art either (yt-dlp errors the job, not a
+  // graceful skip) — the engine now skips the flag; the ui must say why.
+  const wavWarn = opts.dlType === "audio" && opts.audioFormat === "wav" && opts.coverMode !== "none";
   const isVideo = opts.dlType === "video";
 
   return (
@@ -317,6 +322,11 @@ export default function Composer() {
                   {note}
                 </div>
               )}
+              {wavWarn && (
+                <div className="warn" style={{ gridColumn: "1/-1" }}>
+                  wav can't hold cover art — art will be skipped
+                </div>
+              )}
             </>
           )}
 
@@ -389,7 +399,7 @@ export default function Composer() {
                   <option value="opus">opus — smaller, some players can't play it</option>
                   <option value="aac">aac — universal compatibility</option>
                 </select>
-                <span className="hint">picks the audio stream; other sites may serve different ones</span>
+                <span className="hint">{opts.container === "webm" && opts.audioPref === "aac" ? "webm can't hold aac — opus is used regardless" : "picks the audio stream; other sites may serve different ones"}</span>
               </div>
             </>
           )}

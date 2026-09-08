@@ -187,7 +187,10 @@ export interface AddFeedback {
 export const jobAdd = (urls: string[], options: JobOptions, destination?: string) =>
   invoke<AddFeedback>("job_add", { urls, options, destination: destination ?? null });
 export const jobStop = (id: string) => invoke<void>("job_stop", { id });
-export const jobRetry = (id: string) => invoke<void>("job_retry", { id });
+/** d88: retry re-queues with the composer's LIVE options and destination —
+ * "queue this url again, exactly as queueing it now would". */
+export const jobRetryOptions = (id: string, options: JobOptions, destination?: string) =>
+  invoke<void>("job_retry_options", { id, options, destination: destination ?? null });
 export const jobRemove = (id: string) => invoke<void>("job_remove", { id });
 /** D59: server-side existence probe for the re-download confirm gate
  * (renderer has no fs access; the dialog plugin opens, not probes). */

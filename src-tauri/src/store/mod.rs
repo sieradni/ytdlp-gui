@@ -23,6 +23,12 @@ pub struct JobRow {
     pub title: Option<String>,
     pub format: Option<String>,
     pub final_path: Option<String>,
+    /// resolved extractor id (d88), persisted when known: `youtube jNQX…`.
+    /// lets retry clean the ORIGINAL destination's partial artifacts after
+    /// the options/dest swap, and lets finalize attribute stray thumbnail
+    /// sidecars to the finished download. null until the identity resolves.
+    #[serde(default)]
+    pub vid: Option<String>,
     pub pct: Option<f64>,
     pub speed_bps: Option<f64>,
     pub eta_sec: Option<u64>,
@@ -66,6 +72,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   title TEXT,
   format TEXT,
   final_path TEXT,
+  vid TEXT,
   pct REAL,
   speed_bps REAL,
   eta_sec INTEGER,
@@ -126,10 +133,10 @@ impl Db {
 
     pub fn insert_job(&self, j: &JobRow) -> AppResult<()> {
         self.conn().execute(
-            "INSERT INTO jobs (id, options, dest, state, title, format, final_path, pct, speed_bps, eta_sec, error, skipped, items_done, items_total, created_at, updated_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
+            "INSERT INTO jobs (id, options, dest, state, title, format, final_path, vid, pct, speed_bps, eta_sec, error, skipped, items_done, items_total, created_at, updated_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
             rusqlite::params![
-                j.id, j.options, j.dest, j.state, j.title, j.format, j.final_path,
+                j.id, j.options, j.dest, j.state, j.title, j.format, j.final_path, j.vid,
                 j.pct, j.speed_bps, j.eta_sec.map(|v| v as i64), j.error,
                 j.skipped as i64, j.items_done.map(|v| v as i64), j.items_total.map(|v| v as i64),
                 j.created_at, j.updated_at
@@ -140,9 +147,9 @@ impl Db {
 
     pub fn update_job(&self, id: &str, j: &JobRow) -> AppResult<()> {
         self.conn().execute(
-            "UPDATE jobs SET options=?2, dest=?3, state=?4, title=?5, format=?6, final_path=?7, pct=?8, speed_bps=?9, eta_sec=?10, error=?11, skipped=?12, items_done=?13, items_total=?14, updated_at=?15 WHERE id=?1",
+            "UPDATE jobs SET options=?2, dest=?3, state=?4, title=?5, format=?6, final_path=?7, vid=?8, pct=?9, speed_bps=?10, eta_sec=?11, error=?12, skipped=?13, items_done=?14, items_total=?15, updated_at=?16 WHERE id=?1",
             rusqlite::params![
-                id, j.options, j.dest, j.state, j.title, j.format, j.final_path,
+                id, j.options, j.dest, j.state, j.title, j.format, j.final_path, j.vid,
                 j.pct, j.speed_bps, j.eta_sec.map(|v| v as i64), j.error,
                 j.skipped as i64, j.items_done.map(|v| v as i64), j.items_total.map(|v| v as i64),
                 j.updated_at
@@ -155,7 +162,7 @@ impl Db {
     pub fn list_jobs(&self) -> AppResult<Vec<JobRow>> {
         let conn = self.conn();
         let mut stmt = conn.prepare(
-            "SELECT id, options, dest, state, title, format, final_path, pct, speed_bps, eta_sec, error, skipped, items_done, items_total, created_at, updated_at
+            "SELECT id, options, dest, state, title, format, final_path, vid, pct, speed_bps, eta_sec, error, skipped, items_done, items_total, created_at, updated_at
              FROM jobs ORDER BY created_at ASC, rowid ASC",
         )?;
         let rows = stmt
@@ -305,15 +312,16 @@ fn row_to_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<JobRow> {
         title: row.get(4)?,
         format: row.get(5)?,
         final_path: row.get(6)?,
-        pct: row.get(7)?,
-        speed_bps: row.get(8)?,
-        eta_sec: row.get::<_, Option<i64>>(9)?.map(|v| v.max(0) as u64),
-        error: row.get(10)?,
-        skipped: row.get::<_, i64>(11)? != 0,
-        items_done: row.get::<_, Option<i64>>(12)?.map(|v| v.max(0) as u32),
-        items_total: row.get::<_, Option<i64>>(13)?.map(|v| v.max(0) as u32),
-        created_at: row.get(14)?,
-        updated_at: row.get(15)?,
+        vid: row.get(7)?,
+        pct: row.get(8)?,
+        speed_bps: row.get(9)?,
+        eta_sec: row.get::<_, Option<i64>>(10)?.map(|v| v.max(0) as u64),
+        error: row.get(11)?,
+        skipped: row.get::<_, i64>(12)? != 0,
+        items_done: row.get::<_, Option<i64>>(13)?.map(|v| v.max(0) as u32),
+        items_total: row.get::<_, Option<i64>>(14)?.map(|v| v.max(0) as u32),
+        created_at: row.get(15)?,
+        updated_at: row.get(16)?,
     })
 }
 
@@ -368,6 +376,7 @@ fn ensure_columns(conn: &Connection) {
             "items_total",
             "ALTER TABLE jobs ADD COLUMN items_total INTEGER",
         ),
+        ("vid", "ALTER TABLE jobs ADD COLUMN vid TEXT"),
     ] {
         if !existing.contains(col) {
             if let Err(e) = conn.execute_batch(ddl) {
@@ -518,6 +527,47 @@ pub fn default_archive_path() -> std::path::PathBuf {
     crate::binaries::manager::app_data_dir().join("downloaded.txt")
 }
 
+/// d88: remove one job's leftover download artifacts from a destination
+/// directory. scoped to the resolved `[<vid>]` filename marker and to the
+/// artifact extensions the engine actually produces — never a general file
+/// deletion. callers: retry_with_options sweeps the ORIGINAL destination's
+/// partial anchors when the destination changes (`parts=true`); finalize
+/// sweeps a finished/failed job's thumbnail sidecars beside the target
+/// (`sidecars=true` — the embedder normally consumes them, but an aborted
+/// postprocess scatters `.webp`/`.png` debris). the finished media file and
+/// everything belonging to other ids is never touched. missing dir is a
+/// no-op; returns how many files went away.
+pub fn sweep_job_artifacts(dir: &std::path::Path, vid: &str, parts: bool, sidecars: bool) -> usize {
+    if vid.is_empty() || (!parts && !sidecars) {
+        return 0;
+    }
+    let marker = format!(" [{vid}]");
+    let part_exts: [&str; 3] = [".part", ".ytdl", ".temp"];
+    let side_exts: [&str; 4] = [".webp", ".png", ".jpg", ".jpeg"];
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut removed = 0usize;
+    for entry in rd.filter_map(|e| e.ok()) {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !name.contains(&marker) {
+            continue;
+        }
+        let is_part = part_exts.iter().any(|x| name.ends_with(x));
+        // sidecars are image files whose stem is exactly the target name
+        // (`Title [vid].webp`); `Title [vid].cover.png` (yt-dlp's -k layout)
+        // also matches the marker but must survive a finalize sweep when the
+        // user keeps cover files — handled by the caller via `sidecars`.
+        let is_side = side_exts.iter().any(|x| name.ends_with(x));
+        if ((parts && is_part) || (sidecars && is_side))
+            && std::fs::remove_file(entry.path()).is_ok()
+        {
+            removed += 1;
+        }
+    }
+    removed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -531,6 +581,7 @@ mod tests {
             title: None,
             format: None,
             final_path: None,
+            vid: None,
             pct: None,
             speed_bps: None,
             eta_sec: None,
@@ -745,6 +796,46 @@ mod tests {
         // missing file is not an error
         let n3 = archive_remove(&dir.join("nope.txt"), &[("youtube".into(), "x".into())]).unwrap();
         assert_eq!(n3, 0);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn sweep_job_artifacts_is_marker_scoped_d88() {
+        let dir = std::env::temp_dir().join(format!("yg-sweep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // artifacts of the target id: partial anchor + a thumbnail sidecar
+        std::fs::write(dir.join("Track [abc123].opus.part"), b"x").unwrap();
+        std::fs::write(dir.join("Track [abc123].opus.ytdl"), b"x").unwrap();
+        std::fs::write(dir.join("Track [abc123].webp"), b"x").unwrap();
+        // finished file and unrelated files must never be touched
+        std::fs::write(dir.join("Track [abc123].opus"), b"x").unwrap();
+        std::fs::write(dir.join("Other [zzz999].opus.part"), b"x").unwrap();
+        std::fs::write(dir.join("unrelated.opus.part"), b"x").unwrap();
+
+        // parts-only (retry's old-destination sweep): partials go so the
+        // abandoned folder keeps no dead anchor; sidecar + audio stay
+        let n = sweep_job_artifacts(&dir, "abc123", true, false);
+        assert_eq!(n, 2, "part + ytdl only");
+        assert!(dir.join("Track [abc123].opus").exists());
+        assert!(dir.join("Track [abc123].webp").exists());
+        assert!(dir.join("Other [zzz999].opus.part").exists());
+
+        // sidecars-only (finalize sweep): the orphan webp goes, partials
+        // stay so an in-place retry can still resume them
+        let n2 = sweep_job_artifacts(&dir, "abc123", false, true);
+        assert_eq!(n2, 1, "webp sidecar only");
+        assert!(!dir.join("Track [abc123].webp").exists());
+        assert!(dir.join("Track [abc123].opus").exists());
+        assert!(dir.join("Other [zzz999].opus.part").exists());
+
+        // empty vid, both-off, and missing dir are no-ops
+        assert_eq!(sweep_job_artifacts(&dir, "", true, true), 0);
+        assert_eq!(sweep_job_artifacts(&dir, "abc123", false, false), 0);
+        assert_eq!(
+            sweep_job_artifacts(&dir.join("nope"), "abc123", true, true),
+            0
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

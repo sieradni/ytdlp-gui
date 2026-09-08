@@ -142,6 +142,27 @@ fn options_of(options: &str) -> JobOptions {
     serde_json::from_str(options).unwrap_or_default()
 }
 
+/// d88: the retry row mutation, pure so it is testable without an app
+/// handle. state machine reset + the options/dest swap (url preserved from
+/// the old options json — retry never changes what is downloaded, only how
+/// and where). title is deliberately KEPT: the probe already paid for it
+/// and the row keeps its name while it waits to dispatch again.
+fn apply_retry_to_row(row: &mut JobRow, opts: &JobOptions, dest: &str) {
+    row.options = options_with_url(opts, &url_of_options(&row.options));
+    row.dest = dest.to_owned();
+    row.state = "queued".into();
+    row.pct = None;
+    row.speed_bps = None;
+    row.eta_sec = None;
+    row.format = None;
+    row.final_path = None;
+    row.skipped = false;
+    row.items_done = None;
+    row.items_total = None;
+    row.error = None;
+    row.updated_at = crate::store::now_unix();
+}
+
 // ---------------------------------------------------------------------------
 // queue
 // ---------------------------------------------------------------------------
@@ -269,6 +290,7 @@ impl JobQueue {
                         title: None,
                         format: None,
                         final_path: None,
+                        vid: None,
                         pct: None,
                         speed_bps: None,
                         eta_sec: None,
@@ -308,10 +330,21 @@ impl JobQueue {
         }
     }
 
-    /// retry ↻ (stopped/error): re-queue same options; yt-dlp resumes
-    /// partials. if the archive already holds the identity, the job ends
-    /// Done/skipped on next run (§6 — correct and expected).
-    pub fn retry(&self, id: &str) -> AppResult<()> {
+    /// retry ↻ (stopped/error) with the user's CURRENT composer options and
+    /// destination (d88). the old behavior re-queued the job's frozen options
+    /// json — counterintuitive: toggling cookies or changing the format, then
+    /// pressing retry, silently repeated the failed attempt verbatim. the
+    /// frontend passes the live composer state here; retry therefore means
+    /// "queue this url again, exactly as queueing it now would".
+    ///
+    /// destination swap: the ORIGINAL destination's partial artifacts (.part/
+    /// .ytdl) are swept so the abandoned folder keeps no dead anchor; the
+    /// finished file there is never touched (the user moved, not deleted —
+    /// deleting a finished download is an explicit history action).
+    /// title/format/pct reset with the state machine; the archive is not
+    /// consulted here — run_job's own pre-check/yt-dlp archive semantics
+    /// apply unchanged on the new attempt.
+    pub fn retry_with_options(&self, id: &str, opts: &JobOptions, dest: &str) -> AppResult<()> {
         let mut rows = self.db.list_jobs()?;
         let Some(row) = rows.iter_mut().find(|r| r.id == id) else {
             return Err(other("no such job"));
@@ -319,11 +352,17 @@ impl JobQueue {
         if !matches!(row.state.as_str(), "stopped" | "error") {
             return Err(other("only stopped or error jobs can be retried"));
         }
-        row.state = "queued".into();
-        row.pct = None;
-        row.speed_bps = None;
-        row.eta_sec = None;
-        row.updated_at = crate::store::now_unix();
+        let old_dest = row.dest.clone();
+        apply_retry_to_row(row, opts, dest);
+        // d88: the old destination must not keep this job's stale download
+        // anchor once the job re-points elsewhere. vid may not be known (the
+        // job died during fetch) — no marker, nothing to sweep, no harm.
+        if let Some(vid) = &row.vid {
+            let old = std::path::Path::new(&old_dest);
+            if old.is_dir() && old != std::path::Path::new(dest) {
+                crate::store::sweep_job_artifacts(old, vid, true, true);
+            }
+        }
         self.db.update_job(id, row)?;
         self.emit_queue_changed();
         Ok(())
@@ -512,6 +551,26 @@ impl JobQueue {
         // alive for the history write and the probe title (D54).
         let identity_key: Option<String> = identity.as_ref().map(|i| i.key());
 
+        // d88: persist the resolved id on the row as soon as it is known —
+        // retry's old-destination sweep and finalize's sidecar sweep are both
+        // keyed on it, and both must work even if the job dies later (stop,
+        // crash, fetch error on a later attempt).
+        if let Some(key) = &identity_key {
+            if key
+                .split_once(' ')
+                .map(|(_, v)| !v.is_empty())
+                .unwrap_or(false)
+            {
+                let vid = key.split_once(' ').map(|(_, v)| v.to_owned());
+                let mut row = self.row(&id);
+                if row.vid.is_none() {
+                    row.vid = vid;
+                    row.updated_at = crate::store::now_unix();
+                    self.save_row(&row);
+                }
+            }
+        }
+
         if let Some(key) = &identity_key {
             // lock scope is minimal — no awaits while the guard lives
             let duplicate = {
@@ -539,7 +598,13 @@ impl JobQueue {
             // meaningless — within-playlist skipping is yt-dlp's native
             // --download-archive behavior.
             let is_playlist = identity.as_ref().is_some_and(|i| i.is_playlist);
-            if !is_playlist && opts.skip_downloaded {
+            if !is_playlist && archive_precheck_applies(opts.skip_downloaded, opts.overwrite) {
+                // d91: an explicit overwrite grant (or a d63 force
+                // re-download, which carries both flags) must not be
+                // second-guessed by the archive pre-check — the user just
+                // confirmed they want a fresh download. the archive-append
+                // below stays idempotent either way, so the archive never
+                // drifts.
                 let (ex, vid) = key.split_once(' ').expect("identity key shape");
                 let arch = default_archive_path();
                 if archive_contains(&arch, ex, vid) {
@@ -572,6 +637,17 @@ impl JobQueue {
                     );
                 }
             }
+
+            // d89: no engine-side overwrite REFUSAL here, deliberately. a
+            // hard gate would over-ask: the "* [<id>].*" match is an
+            // over-approximation (a queue for the webm container would be
+            // refused because an .opus sibling exists), and yt-dlp itself
+            // never overwrites without --force-overwrites. instead the skip
+            // is REVEALED: the done branch marks the row skipped with an
+            // actionable message when yt-dlp's "has already been downloaded"
+            // skip fired without explicit overwrite consent — no silent
+            // done-with-no-bytes-moved rows (D62), no blocked container
+            // changes. the composer's D60 dialog remains the consent surface.
         }
 
         // ---- downloading ----
@@ -626,6 +702,7 @@ impl JobQueue {
                 title,
                 items_done,
                 items_total,
+                skipped_existing,
             } => {
                 // d62: done means evidence. the after_move:filepath print can
                 // be swallowed (hostile titles defeat any heuristic; custom
@@ -744,6 +821,21 @@ impl JobQueue {
                 if row.title.is_none() {
                     row.title = title;
                 }
+                // d89: reveal the file-exists skip — done must never pretend
+                // bytes moved (D62). the composer's D60 dialog is the consent
+                // surface; when a queue lands here anyway (probe raced out,
+                // api path, container change), the row says so and names the
+                // exact recourse instead of a silent no-op.
+                if skipped_existing && !is_playlist && !opts.overwrite {
+                    row.skipped = true;
+                    row.error = Some(
+                        "already downloaded — file left as-is. to replace it: open history and press ↻ (re-download), or delete the existing file first".into(),
+                    );
+                    self.push_log(
+                        &id,
+                        "yt-dlp skipped the download: the target file already exists (D89)".into(),
+                    );
+                }
                 row.updated_at = crate::store::now_unix();
                 self.save_row(&row);
                 self.emit_update(&row);
@@ -791,6 +883,10 @@ impl JobQueue {
         let mut items_total: Option<u32> = None;
         let mut seen_items: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut last_items_db = std::time::Instant::now();
+        // d89: single-job file-exists skip — yt-dlp prints "has already been
+        // downloaded" and exits 0 without touching the file. (playlist skips
+        // are per-item truth and flow through PlaylistSkip instead.)
+        let mut skipped_existing = false;
 
         loop {
             tokio::select! {
@@ -809,6 +905,7 @@ impl JobQueue {
                                 title,
                                 items_done,
                                 items_total,
+                                skipped_existing,
                             },
                             Ok(s) => RunOutcome::Error(
                                 last_error.unwrap_or_else(|| format!("yt-dlp exited with {s}")),
@@ -820,6 +917,9 @@ impl JobQueue {
                     // expando row (§6) — every line, capped; frontend mirrors it
                     let kind = crate::engine::parser::classify(&raw);
                     self.push_log(id, raw.clone());
+                    if raw.contains("has already been downloaded") {
+                        skipped_existing = true;
+                    }
                     let _ = self.app.emit(
                         "job:log",
                         serde_json::json!({ "id": id, "line": raw, "kind": kind }),
@@ -975,6 +1075,7 @@ impl JobQueue {
                 title: None,
                 format: None,
                 final_path: None,
+                vid: None,
                 pct: None,
                 speed_bps: None,
                 eta_sec: None,
@@ -1018,6 +1119,10 @@ impl JobQueue {
         row.eta_sec = None;
         row.updated_at = crate::store::now_unix();
         self.save_row(&row);
+        // d88: postprocessor debris cleanup — after the row save (fresh vid
+        // visible) and before the terminal event (the frontend pull must see
+        // the post-sweep destination).
+        self.sweep_terminal_sidecars(id);
         let _ = self.app.emit(
             "job:update",
             serde_json::json!({ "id": id, "state": state.as_str(), "error": msg }),
@@ -1034,6 +1139,44 @@ impl JobQueue {
                 "finalPath": row.final_path, "error": row.error,
             }),
         );
+    }
+
+    /// d88: after a terminal state, remove this job's thumbnail sidecars from
+    /// the destination when a real target for the id exists beside them — a
+    /// crashed/aborted postprocessor otherwise leaves `Title [vid].webp/png`
+    /// debris forever (live-verified: a wav target errors in
+    /// ThumbnailsConvertor AFTER writing both webp and png; the .wav itself
+    /// stays and so does the debris). evidence rule: sweep only when a
+    /// marker-matching non-image, non-partial file exists — otherwise there
+    /// is no finished target and the images may be the only artifact.
+    /// partials are deliberately KEPT: a stop can precede finalize, and an
+    /// in-place retry must be able to resume them (yt-dlp contract).
+    fn sweep_terminal_sidecars(&self, id: &str) {
+        let row = self.row(id);
+        let Some(vid) = row.vid.as_deref().filter(|v| !v.is_empty()) else {
+            return;
+        };
+        let dest = std::path::Path::new(&row.dest);
+        let marker = format!(" [{vid}]");
+        let has_target = std::fs::read_dir(dest)
+            .ok()
+            .map(|rd| {
+                rd.filter_map(|e| e.ok()).any(|e| {
+                    let name = e.file_name().to_string_lossy().into_owned();
+                    name.contains(&marker)
+                        && !name.ends_with(".part")
+                        && !name.ends_with(".ytdl")
+                        && !name.ends_with(".temp")
+                        && !name.ends_with(".webp")
+                        && !name.ends_with(".png")
+                        && !name.ends_with(".jpg")
+                        && !name.ends_with(".jpeg")
+                })
+            })
+            .unwrap_or(false);
+        if has_target {
+            crate::store::sweep_job_artifacts(dest, vid, false, true);
+        }
     }
 
     fn cleanup_running(&self, id: &str, url: &str, identity: Option<&str>) {
@@ -1075,6 +1218,9 @@ enum RunOutcome {
         /// last item is never lost to the throttled 500 ms db write.
         items_done: Option<u32>,
         items_total: Option<u32>,
+        /// d89: yt-dlp printed "has already been downloaded" — the run moved
+        /// no bytes and left the existing file as-is.
+        skipped_existing: bool,
     },
     Stopped,
     Error(String),
@@ -1355,9 +1501,29 @@ fn rewrite_cookie_error(msg: &str) -> String {
     }
 }
 
+/// d91: the archive pre-check must yield to an explicit overwrite grant —
+/// the user just confirmed they want a fresh download; the engine must not
+/// second-guess that with a silent archive skip. pure function, test-pinned.
+fn archive_precheck_applies(skip_downloaded: bool, overwrite: bool) -> bool {
+    skip_downloaded && !overwrite
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn archive_precheck_yields_to_overwrite_d91() {
+        // plain queue: pre-check applies
+        assert!(archive_precheck_applies(true, false));
+        // d63 force re-download (↻): skipDownloaded=false, overwrite=true
+        assert!(!archive_precheck_applies(false, true));
+        // a granted overwrite dialog with skip on: the grant wins — no silent
+        // archive skip after an explicit "overwrite" confirm
+        assert!(!archive_precheck_applies(true, true));
+        // skip off, no overwrite: nothing to pre-check
+        assert!(!archive_precheck_applies(false, false));
+    }
 
     #[test]
     fn skip_existing_rewrite_matches_only_the_full_signature() {
@@ -1441,6 +1607,57 @@ mod tests {
         let json = options_with_url(&opts, "https://youtu.be/x");
         assert_eq!(url_of_options(&json), "https://youtu.be/x");
         assert_eq!(options_of(&json), opts);
+    }
+
+    #[test]
+    fn retry_swaps_options_and_resets_run_fields_keeps_url_and_title_d88() {
+        let old = JobOptions {
+            cookies: crate::engine::args::CookieSource::default(),
+            ..JobOptions::default()
+        };
+        let mut row = JobRow {
+            id: "j1".into(),
+            options: options_with_url(&old, "https://youtu.be/x"),
+            dest: r"C:\old".into(),
+            state: "error".into(),
+            title: Some("kept title".into()),
+            format: Some("opus".into()),
+            final_path: Some(r"C:\old\t [x].opus".into()),
+            vid: Some("x".into()),
+            pct: Some(41.0),
+            speed_bps: Some(999.0),
+            eta_sec: Some(12),
+            error: Some("boom".into()),
+            skipped: true,
+            items_done: Some(1),
+            items_total: Some(2),
+            created_at: 1,
+            updated_at: 1,
+        };
+        let new = JobOptions {
+            cookies: crate::engine::args::CookieSource {
+                kind: crate::engine::args::CookieKind::FromBrowser,
+                browser: Some("firefox".into()),
+                file: None,
+            },
+            audio_format: crate::engine::args::AudioFormat::Flac,
+            ..JobOptions::default()
+        };
+        apply_retry_to_row(&mut row, &new, r"C:\new");
+        // url and title survive; everything run-shaped resets
+        assert_eq!(url_of_options(&row.options), "https://youtu.be/x");
+        assert_eq!(options_of(&row.options).cookies, new.cookies);
+        assert_eq!(
+            options_of(&row.options).audio_format,
+            crate::engine::args::AudioFormat::Flac
+        );
+        assert_eq!(row.dest, r"C:\new");
+        assert_eq!(row.state, "queued");
+        assert_eq!(row.title.as_deref(), Some("kept title"));
+        assert!(row.pct.is_none() && row.error.is_none() && row.final_path.is_none());
+        assert!(!row.skipped && row.items_done.is_none() && row.items_total.is_none());
+        // the resolved id persists — retry's old-dest sweep keys on it
+        assert_eq!(row.vid.as_deref(), Some("x"));
     }
 
     #[test]

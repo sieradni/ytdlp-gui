@@ -3,7 +3,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   jobAdd,
   jobRemove,
-  jobRetry,
+  jobRetryOptions,
   jobStop,
   queueList,
   queuePause,
@@ -12,6 +12,9 @@ import {
   type JobOptions,
   type JobState,
 } from "../lib/ipc";
+// d88: retry re-queues with the composer's CURRENT options — the mirror is
+// written by the composer on every change (see lib/composeMirror.ts).
+import { currentOptions } from "../lib/composeMirror";
 
 // ---------------------------------------------------------------------------
 // sorting (§6): header click cycles asc ▲ → desc ▼ → default; default =
@@ -163,7 +166,13 @@ export const useQueue = create<QueueState>((set, get) => ({
     await get().load();
   },
   retry: async (id) => {
-    await jobRetry(id);
+    // d88: "retry" must mean what the user expects — the job re-queues with
+    // the composer's live options/destination, so turning on cookies or
+    // changing the format BEFORE pressing retry actually applies. the
+    // engine sweeps the original destination's partial artifacts if the
+    // destination changed (never the finished file). destination is
+    // resolved server-side through the same chain as job_add.
+    await jobRetryOptions(id, currentOptions);
     await get().load();
   },
   remove: async (id) => {

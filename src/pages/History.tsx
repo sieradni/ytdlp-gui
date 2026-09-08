@@ -17,7 +17,7 @@ import {
   type ArtifactReport,
   type HistoryRow,
 } from "../lib/ipc";
-import { currentOptions } from "../components/Composer";
+import { currentOptions } from "../lib/composeMirror";
 
 function fmtSize(bytes: number | null): string {
   if (bytes == null) return "—";

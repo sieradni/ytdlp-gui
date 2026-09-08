@@ -66,7 +66,11 @@ function Actions({ job }: { job: Job }) {
         </button>
       )}
       {(job.state === "stopped" || job.state === "error") && (
-        <button className="iconbtn" title="retry" onClick={() => void retry(job.id)}>
+        <button
+          className="iconbtn"
+          title="retry with current composer settings"
+          onClick={() => void retry(job.id)}
+        >
           ↻
         </button>
       )}

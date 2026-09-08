@@ -223,18 +223,63 @@ pub fn build_argv(
                 argv.push("--audio-format".into());
                 argv.push(audio_format_str(opts.audio_format).into());
             }
-            push_cover_args(&mut argv, opts.cover_mode, opts.cover_w, opts.cover_h)?;
+            // d88: wav cannot hold embedded art and yt-dlp does not skip
+            // quietly — it ERRORS the whole job in postprocessing
+            // ("Supported filetypes for thumbnail embedding are: …") and
+            // scatters .webp/.png sidecars (live-verified 2026-09-06, same
+            // failure class as webm above; alac lands as m4a and embeds
+            // fine, as does the default best→opus target). the composer
+            // warns "cover art will be skipped"; the engine must actually
+            // skip.
+            if opts.audio_format != AudioFormat::Wav {
+                push_cover_args(&mut argv, opts.cover_mode, opts.cover_w, opts.cover_h)?;
+            }
         }
         DlType::Video => {
             let cap = height_filter(&opts.max_resolution);
-            let audio = match opts.audio_pref {
-                VideoAudioPref::Opus => "",
-                VideoAudioPref::Aac => "[ext=m4a]",
+            // d90: the container constrains the stream selection, not just the
+            // merger. webm (Matroska subset) can hold ONLY vp8/vp9/av1 video
+            // and vorbis/opus audio — the old unfiltered `ba` picked the
+            // highest-bitrate audio, which on youtube is the 256k m4a (aac):
+            // yt-dlp then tried to merge aac into webm and ffmpeg failed the
+            // whole job with the cryptic "Postprocessing: Conversion failed!"
+            // (live-reproduced 2026-09-07: bbb 1080p, f399 + f258.m4a →
+            // .temp.webm debris). webm jobs therefore select webm-native
+            // streams with NO unfiltered fallback — an unresolvable request
+            // errors honestly ("requested format not available") instead of
+            // failing at the merge. mp4/mkv are permissive containers: any
+            // stream pair remuxes, so the old chain stays.
+            let (bv, ba, single) = match opts.container {
+                VideoContainer::Webm => (
+                    format!("bv*[ext=webm]{cap}"),
+                    "ba[ext=webm]".to_string(),
+                    "b[ext=webm]".to_string(),
+                ),
+                _ => (
+                    format!("bv*{cap}"),
+                    match opts.audio_pref {
+                        VideoAudioPref::Opus => "ba".to_string(),
+                        VideoAudioPref::Aac => "ba[ext=m4a]".to_string(),
+                    },
+                    "b".to_string(),
+                ),
             };
+            // d90: webm has no unfiltered fallback — every leg keeps its ext
+            // filters, or the merge fails post-hoc with the cryptic error the
+            // d90 comment above documents. the aac pref's second-chance leg
+            // (dropping [ext=m4a]) is likewise webm-forbidden.
             let fmt = if cap.is_empty() {
-                format!("bv*+ba{audio}/bv*+ba/b")
+                match opts.container {
+                    VideoContainer::Webm => format!("{bv}+{ba}/{single}"),
+                    _ => format!("{bv}+{ba}/{bv}+ba/{single}"),
+                }
             } else {
-                format!("bv*{cap}+ba{audio}/bv*{cap}+ba/b{cap}/b")
+                match opts.container {
+                    // no /b tail for webm: an unfiltered single-format fallback
+                    // could serve h264-in-mp4 straight into the doomed webm merge
+                    VideoContainer::Webm => format!("{bv}+{ba}/{single}{cap}"),
+                    _ => format!("{bv}+{ba}/{bv}+ba/{single}{cap}/b"),
+                }
             };
             argv.push("-f".into());
             argv.push(fmt);
@@ -485,6 +530,46 @@ mod tests {
     }
 
     #[test]
+    fn d90_webm_selects_only_webm_native_streams() {
+        // live-reproduced failure (2026-09-07): the old unfiltered `ba` picked
+        // youtube's 256k m4a; merging aac into webm errored the whole job with
+        // the cryptic "Postprocessing: Conversion failed!". every webm leg
+        // must carry ext filters — no unfiltered fallback survives.
+        let mut o = base_audio();
+        o.dl_type = DlType::Video;
+        o.container = VideoContainer::Webm;
+        o.max_resolution = "1080p".into();
+        o.audio_pref = VideoAudioPref::Aac; // even an aac pref cannot buy aac-in-webm
+        o.cover_mode = CoverMode::None;
+        let argv = build_argv(&o, "d", None, None).unwrap();
+        let s = argv.join(" ");
+        assert!(
+            s.contains("-f bv*[ext=webm][height<=1080]+ba[ext=webm]/b[ext=webm][height<=1080]"),
+            "{s}"
+        );
+        assert!(
+            !s.contains("ext=m4a"),
+            "aac pref must not leak into a webm job: {s}"
+        );
+        // the unfiltered tails (/bv*+ba/b) of the permissive chain must be gone
+        assert!(!s.contains("-f bv*+ba "), "{s}");
+    }
+
+    #[test]
+    fn d90_webm_best_has_no_fallback_chain_leak() {
+        let mut o = base_audio();
+        o.dl_type = DlType::Video;
+        o.container = VideoContainer::Webm;
+        o.cover_mode = CoverMode::None;
+        let argv = build_argv(&o, "d", None, None).unwrap();
+        let s = argv.join(" ");
+        assert!(
+            s.contains("-f bv*[ext=webm]+ba[ext=webm]/b[ext=webm]"),
+            "{s}"
+        );
+    }
+
+    #[test]
     fn cookies_and_extras_and_template() {
         let mut o = base_audio();
         o.cover_mode = CoverMode::None;
@@ -537,6 +622,30 @@ mod tests {
         let argv = build_argv(&o, "d", None, None).unwrap();
         let i = argv.iter().position(|a| a == "--playlist-end").unwrap();
         assert_eq!(argv[i + 1], "1");
+    }
+
+    #[test]
+    fn wav_target_skips_cover_args_d88() {
+        // live-verified 2026-09-06: yt-dlp ERRORS the whole job in
+        // postprocessing when --embed-thumbnail targets wav ("Supported
+        // filetypes for thumbnail embedding are: …") and leaves .webp/.png
+        // debris — the engine must not emit the flag for wav (alac lands as
+        // m4a and embeds fine; webm is guarded in the video branch).
+        let mut o = base_audio();
+        o.audio_format = AudioFormat::Wav;
+        let argv = build_argv(&o, r"C:\dl", None, None).unwrap();
+        let s = argv.join(" ");
+        assert!(!s.contains("--embed-thumbnail"));
+        assert!(!s.contains("ThumbnailsConvertor"));
+        // conversion still requested, art silently absent
+        assert!(s.contains("--audio-format wav"));
+
+        // control: the same options on opus keep the embed (the default
+        // best target resolves to opus on youtube)
+        let mut o2 = base_audio();
+        o2.audio_format = AudioFormat::Opus;
+        let s2 = build_argv(&o2, r"C:\dl", None, None).unwrap().join(" ");
+        assert!(s2.contains("--embed-thumbnail"));
     }
 
     #[test]

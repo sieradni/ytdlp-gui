@@ -78,9 +78,23 @@ pub fn job_stop(handle: tauri::State<'_, QueueHandle>, id: String) -> AppResult<
     handle.0.stop(&id)
 }
 
+/// d88: retry means "queue this url again, exactly as queueing it now
+/// would" — the frontend passes the composer's LIVE options and destination
+/// (resolved through the same fallback chain as job_add). the old retry
+/// re-queued the job's frozen options json, so changing cookies/format/
+/// destination and pressing retry silently repeated the failed attempt
+/// verbatim. the engine sweeps the original destination's partial artifacts
+/// when the destination changed; the archive logic is run_job's own.
 #[tauri::command]
-pub fn job_retry(handle: tauri::State<'_, QueueHandle>, id: String) -> AppResult<()> {
-    handle.0.retry(&id)
+pub fn job_retry_options(
+    handle: tauri::State<'_, QueueHandle>,
+    settings: tauri::State<'_, crate::settings::SettingsHandle>,
+    id: String,
+    options: JobOptions,
+    destination: Option<String>,
+) -> AppResult<()> {
+    let dest = resolve_destination(destination, &settings.get());
+    handle.0.retry_with_options(&id, &options, &dest)
 }
 
 #[tauri::command]
