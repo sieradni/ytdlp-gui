@@ -58,6 +58,9 @@ jobs:
           releaseName: "ytdlp-gui ${{ github.ref_name }}"
           releaseBody: "see the assets below to download and install the app."
           releaseDraft: false
-          # v2.0.0-alpha.1 style tags publish as prereleases
-          prerelease: ${{ contains(github.ref_name, '-') }}
+          # every release is the reachable latest: releases/latest (the updater
+          # endpoint) only resolves full releases, so no tag is marked as a
+          # prerelease — otherwise the in-app update can never see it without a
+          # manual make_latest promotion (verified live on alpha.11).
+          prerelease: false
           includeUpdaterJson: true
