@@ -1,69 +1,59 @@
 # ytdlp-gui
 
-modern windows gui for yt-dlp (v2 rewrite of `gui.py` — see `docs/V2_DESIGN.md`).
+Windows desktop GUI for [yt-dlp](https://github.com/yt-dlp/yt-dlp). Paste URLs, pick options, queue downloads.
 
-stack: **tauri 2 · react 18 · typescript · vite · tailwind v4 · zustand**.
+Stack: Tauri 2 · React 18 · TypeScript · Vite · Tailwind v4 · Zustand · SQLite.
 
-## development
+## Features
+
+- **Queue:** multiple URLs at once, pause / resume / retry / stop, concurrency 1–4, live progress with speed / ETA and per-job logs.
+- **Formats:** audio (mp3 / m4a / opus / vorbis / flac / alac / wav) or video (mp4 / mkv / webm) with resolution cap, subtitles, cover art, playlist selection (single / all / first N).
+- **Power options:** cookies (none / browser / file), SponsorBlock, custom output template, extra yt-dlp args, color-coded command preview.
+- **Dedupe:** skip-downloaded archive, duplicate detection, overwrite confirmation.
+- **History:** searchable, re-download, show-in-folder / relink, archive import / export / sync (`downloaded.txt`).
+- **Self-managing tools:** first-run wizard downloads verified yt-dlp + ffmpeg into the app data dir; per-tool check / update, custom-path override, v1 (`gui.py`) config + archive migration.
+- **Self-updating app:** checks on launch (plus manual check in Settings), signature-verified install + restart.
+
+## Install
+
+1. Download the NSIS installer from [Releases](https://github.com/sieradni/ytdlp-gui/releases/latest).
+2. Run it (current-user, no admin needed).
+3. On first launch the wizard installs yt-dlp + ffmpeg automatically.
+
+No manual yt-dlp / ffmpeg setup required.
+
+## Use
+
+1. Paste one URL per line, pick destination and options.
+2. `Queue downloads`, watch progress in Home.
+3. Find past downloads in History; app settings and tool updates in Settings.
+
+Data lives in `%APPDATA%\ytdlp-gui\` (`settings.json`, `history.db`, `downloaded.txt`, `bin\`). Reset is available in Settings (keeps `bin\`).
+
+## Development
 
 ```sh
 pnpm install        # once
-pnpm tauri dev      # dev app with hot reload
+pnpm tauri dev      # full app with hot reload
+pnpm dev            # frontend only (browser, no Tauri shell)
 ```
 
-the frontend alone (browser, no tauri shell): `pnpm dev`.
-
-## checks
+Checks (also run in CI on every push / PR):
 
 ```sh
 pnpm typecheck          # tsc --noEmit
-pnpm build              # tsc + vite production build (frontend dist/)
-cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
-cargo fmt --check --manifest-path src-tauri/Cargo.toml
+pnpm build              # tsc + vite build
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+cargo fmt --manifest-path src-tauri/Cargo.toml --check
+cargo test --manifest-path src-tauri/Cargo.toml
 ```
 
-## milestones
+`gui.py` is the legacy v1 client, kept untouched; v2 migrates its config and archive on first run.
 
-m1 scaffold+shell · m2 binary manager · m3 queue parity · m4 metadata+migration ·
-m5 update+packaging · m6 polish · m7 "first real install" (engine truth, installer
-& lifecycle, app-owned dialogs, design pass — D61–D87) — full plan in
-`docs/V2_DESIGN.md` (§12).
+## Releases
 
-v1 (`gui.py`) stays untouched until v2 reaches feature parity (D32).
+Pushing a tag `v*` runs `.github/workflows/release.yml`: builds the NSIS installer, signs the updater artifacts, and publishes the GitHub release with `latest.json` for the in-app updater. Versions are `v2.0.0-alpha.N` until GA.
 
-## releases (m5, §8–9)
+## License
 
-pushing a tag `v*` runs `.github/workflows/release.yml`: tauri-action builds the
-nsis installer, signs the updater artifacts with the repo's minisign key, and
-attaches `latest.json` to the github release — the in-app updater polls that
-file (launch + 6 h) and verifies signatures before installing (D56).
-
-**alpha-testing the updater:** the updater's endpoint resolves via github's
-`releases/latest` URL, which only ever points at a **non-prerelease** release.
-ci publishes every tag as a prerelease (safe default), so after tagging an
-alpha meant for real update testing, run:
-
-```
-gh release edit v2.0.0-alpha.N --prerelease=false --latest
-```
-
-until then the app shows "update check failed: could not fetch a valid release
-json" — that is the endpoint 404ing, not a broken pipeline. older alphas that
-never became "latest" simply never receive update offers (by design).
-
-ci (`.github/workflows/ci.yml`) runs the same gates as the local `## checks` on
-every push and pr.
-
-updater signing (done, m7 close-out — for reference):
-
-1. `pnpm tauri signer generate -w ~/.tauri/ytdlp-gui.key` — creates the
-   password-encrypted minisign pair (private key + password stay in
-   `~/.tauri/` on the operator machine; **back both up** — losing either
-   permanently breaks future in-app updates).
-2. repo secrets set via `gh secret set`: `TAURI_SIGNING_PRIVATE_KEY` = the
-   **raw key file text** (not base64 — the bundler decodes base64 itself),
-   `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` = the key password.
-3. the **base64 public key** is pinned in `tauri.conf.json` →
-   `plugins.updater.pubkey`, and `bundle.createUpdaterArtifacts: true`.
-
-releases are versioned `v2.0.0-alpha.N` prereleases until ga.
+Apache-2.0 — see [LICENSE](LICENSE).
