@@ -440,6 +440,12 @@ tbody tr:hover {
   text-align: right;
   white-space: nowrap;
 }
+.actions-row {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 2px;
+}
 .iconbtn {
   font-family: var(--mono);
   background: none;
@@ -447,9 +453,19 @@ tbody tr:hover {
   color: var(--muted);
   cursor: pointer;
   font-size: 14px;
-  padding: 4px 6px;
-  border-radius: 3px;
+  /* uniform SQUARE hit target: every row action is the same box regardless
+     of glyph width (❋/■/↻/✕/▸/📁) — glyphs center in a fixed square instead
+     of padding-sizing the button. */
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
   line-height: 1;
+  flex: none;
+  vertical-align: middle;
 }
 .iconbtn:hover {
   background: var(--bg-3);

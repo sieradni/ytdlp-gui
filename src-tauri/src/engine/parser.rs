@@ -1,6 +1,16 @@
 //! structured extraction from yt-dlp's stdout/stderr (§5, D45): progress from
 //! the `__P__` template (with a regex fallback), post-processing states,
 //! final paths, errors, playlist item boundaries.
+//!
+//! REGRESSION NOTE (2026-09-08, live-reproduced): the progress template is
+//! passed to yt-dlp as `download:__P__…` — the `download:` selector is
+//! CONSUMED by yt-dlp, which then emits BARE `__P__a|b|c|d` lines. the old
+//! parser matched the argument shape instead of the emitted shape, so every
+//! progress line fell through to the generic `Line` bucket: the queue showed
+//! no percent, no speed, no eta, then jumped to 100% at done. the unit tests
+//! pinned the same wrong shape, which is why 76 green tests missed it. the
+//! verbatim emitted lines live in the tests below — never "normalize" them
+//! back into the argument form.
 
 use serde::{Deserialize, Serialize};
 
@@ -8,9 +18,13 @@ use serde::{Deserialize, Serialize};
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum ParsedLine {
     /// download progress for the current item.
+    /// d92: `total` = exact total_bytes, `total_estimate` = yt-dlp's
+    /// estimate — one of the two is NA per site (youtube exact, most others
+    /// estimate), so the engine takes the first non-NA of the pair.
     Progress {
         downloaded: u64,
         total: Option<u64>,
+        total_estimate: Option<u64>,
         speed_bps: Option<f64>,
         eta_sec: Option<u64>,
     },
@@ -57,11 +71,11 @@ pub fn parse_line(raw: &str) -> ParsedLine {
         return ParsedLine::Error(line.to_owned());
     }
 
-    // ---- progress template: `download:__P__a|b|c|d` → "a|b|c|d" ----
-    if let Some(rest) = t.strip_prefix("download:") {
-        if let Some(vals) = rest.strip_prefix("__P__") {
-            return parse_template_fields(vals);
-        }
+    // ---- progress template output: BARE `__P__a|b|c|d` lines (see module
+    //      note: the `download:` phase selector is consumed by yt-dlp and
+    //      never appears in the emitted line) ----
+    if let Some(vals) = t.strip_prefix("__P__") {
+        return parse_template_fields(vals);
     }
 
     // ---- --print after_move:filepath output (bare path line) ----
@@ -165,21 +179,47 @@ pub fn parse_line(raw: &str) -> ParsedLine {
 }
 
 fn parse_template_fields(vals: &str) -> ParsedLine {
+    // d92 field order (see args.rs ENGINE_FLAGS):
+    // downloaded|total|total_estimate|speed|eta
     let mut it = vals.split('|');
-    let downloaded = it.next().and_then(|v| v.trim().parse::<u64>().ok());
-    let total = it.next().and_then(|v| v.trim().parse::<u64>().ok());
-    let speed = it.next().and_then(|v| v.trim().parse::<f64>().ok());
-    let eta = it.next().and_then(|v| v.trim().parse::<u64>().ok());
+    let downloaded = it.next().and_then(parse_field_u64);
+    let total = it.next().and_then(parse_field_u64);
+    let total_estimate = it.next().and_then(parse_field_u64);
+    let speed = it.next().and_then(parse_field_f64);
+    let eta = it.next().and_then(parse_field_u64);
     match downloaded {
         Some(d) => ParsedLine::Progress {
             downloaded: d,
             total,
+            total_estimate,
             speed_bps: speed,
             eta_sec: eta,
         },
-        // template emitted but fields empty (e.g. post-processing phase)
-        None => ParsedLine::Line(format!("download:{vals}")),
+        // template emitted but the downloaded field is empty/NA
+        None => ParsedLine::Line(format!("__P__{vals}")),
     }
+}
+
+/// one `__P__` field. NA/empty = missing. REGRESSION: yt-dlp renders several
+/// numeric fields through its generic template formatter, so INTEGERS often
+/// arrive as decimals — a live run emits `__P__761|16742.0|0|NA` and
+/// `%(progress.eta)s` flips between `47` and `47.0`. `parse::<u64>` rejected
+/// every one of those, which is why even the fields that DID arrive (total,
+/// eta) were thrown away.
+fn parse_field_u64(v: &str) -> Option<u64> {
+    let f = parse_field_f64(v)?;
+    if !f.is_finite() || f < 0.0 {
+        return None;
+    }
+    Some(f.round() as u64)
+}
+
+fn parse_field_f64(v: &str) -> Option<f64> {
+    let v = v.trim();
+    if v.is_empty() || v == "NA" {
+        return None;
+    }
+    v.parse::<f64>().ok().filter(|f| f.is_finite())
 }
 
 /// `[download]  42.1% of ~ 1.20GiB at 10.80MiB/s ETA 01:11`
@@ -242,31 +282,101 @@ mod tests {
 
     #[test]
     fn template_progress_fields() {
-        let p = parse_line("download:__P__42152704|104857600|11272189.47|47");
+        // verbatim EMITTED shape (live run, 2026-09): bare __P__ prefix, no
+        // `download:` selector — yt-dlp consumes that when parsing the
+        // --progress-template argument.
+        let p = parse_line("__P__42152704|104857600|NA|11272189.47|47");
         match p {
             ParsedLine::Progress {
                 downloaded,
                 total,
+                total_estimate,
                 speed_bps,
                 eta_sec,
             } => {
                 assert_eq!(downloaded, 42_152_704);
                 assert_eq!(total, Some(104_857_600));
+                assert_eq!(total_estimate, None);
                 assert_eq!(speed_bps, Some(11_272_189.47));
                 assert_eq!(eta_sec, Some(47));
             }
             other => panic!("wrong parse: {other:?}"),
         }
+        // the old parser matched only the ARGUMENT shape — pin it as a
+        // generic line so a regression can't resurrect silently
+        assert!(matches!(
+            parse_line("download:__P__1|2|3|4"),
+            ParsedLine::Line(_)
+        ));
+    }
+
+    #[test]
+    fn template_fields_may_be_decimals_the_regression() {
+        // verbatim lines from the live 2026-09-08 run: totals arrive as
+        // DECIMALS through yt-dlp's generic template formatter, and eta/speed
+        // flip between int and decimal forms. every field must survive.
+        // d92: soundcloud shape — estimate present, exact NA.
+        let p = parse_line("__P__761|NA|16742.0|0|NA");
+        match p {
+            ParsedLine::Progress {
+                downloaded,
+                total,
+                total_estimate,
+                speed_bps,
+                eta_sec,
+            } => {
+                assert_eq!(downloaded, 761);
+                assert_eq!(total, None);
+                assert_eq!(total_estimate, Some(16_742));
+                assert_eq!(speed_bps, Some(0.0));
+                assert_eq!(eta_sec, None);
+            }
+            other => panic!("wrong parse: {other:?}"),
+        }
+        // d92: youtube shape — exact present, estimate NA (live 2026-09-08).
+        let yt = parse_line("__P__1024|252182|NA|510758.3893447497|0");
+        match yt {
+            ParsedLine::Progress {
+                downloaded,
+                total,
+                total_estimate,
+                speed_bps,
+                eta_sec,
+            } => {
+                assert_eq!(downloaded, 1024);
+                assert_eq!(total, Some(252_182));
+                assert_eq!(total_estimate, None);
+                assert!((speed_bps.unwrap() - 510_758.39).abs() < 0.01);
+                assert_eq!(eta_sec, Some(0));
+            }
+            other => panic!("wrong parse: {other:?}"),
+        }
+        // decimal total must still parse (estimate field, generic formatter)
+        let p2 = parse_line("__P__252182|NA|2972075.3333333335|408286.63|NA");
+        match p2 {
+            ParsedLine::Progress { total_estimate, .. } => {
+                assert_eq!(total_estimate, Some(2_972_075))
+            }
+            other => panic!("wrong parse: {other:?}"),
+        }
+        // integer eta and decimal eta must parse identically
+        let a = parse_line("__P__100|1000|NA|500.0|47");
+        let b = parse_line("__P__100|1000|NA|500.0|47.0");
+        assert_eq!(format!("{:?}", a), format!("{:?}", b));
     }
 
     #[test]
     fn template_progress_no_total() {
-        match parse_line("download:__P__1000|NA|NA|NA") {
+        match parse_line("__P__1000|NA|NA|NA|NA") {
             ParsedLine::Progress {
-                downloaded, total, ..
+                downloaded,
+                total,
+                total_estimate,
+                ..
             } => {
                 assert_eq!(downloaded, 1000);
                 assert_eq!(total, None);
+                assert_eq!(total_estimate, None);
             }
             other => panic!("wrong parse: {other:?}"),
         }
@@ -387,7 +497,8 @@ mod tests {
 
     #[test]
     fn classify_kinds() {
-        assert_eq!(classify("download:__P__1|2|3|4"), LineKind::Progress);
+        // emitted (bare) shape classifies as progress
+        assert_eq!(classify("__P__1|2|3|4|5"), LineKind::Progress);
         assert_eq!(classify("ERROR: nope"), LineKind::Error);
         assert_eq!(classify("[download] Sleeping…"), LineKind::Info);
     }

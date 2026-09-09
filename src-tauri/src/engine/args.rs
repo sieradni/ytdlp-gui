@@ -154,7 +154,12 @@ const ENGINE_FLAGS: &[&str] = &[
     "--progress",
     "--no-simulate",
     "--progress-template",
-    "download:__P__%(progress.downloaded_bytes)s|%(progress.total_bytes_estimate)s|%(progress.speed)s|%(progress.eta)s",
+    // d92: BOTH size fields. youtube's newer sabr streaming serves total_bytes
+    // (exact, from the format manifest) while total_bytes_estimate stays NA;
+    // soundcloud and others expose only the estimate. the parser takes the
+    // first non-NA of the pair — without the exact field, youtube jobs (the
+    // majority source) never showed a percent at all (live-verified 2026-09).
+    "download:__P__%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.total_bytes_estimate)s|%(progress.speed)s|%(progress.eta)s",
     "--print",
     "after_move:filepath",
     // per-item playlist index print (e2e find, 2026-09-03): the console
@@ -449,6 +454,9 @@ mod tests {
         assert!(s.contains("--progress"));
         assert!(s.contains("--no-simulate"));
         assert!(s.contains("download:__P__"));
+        // d92: both size fields must be in the template (youtube exact / others estimate)
+        assert!(s.contains("%(progress.total_bytes)s"));
+        assert!(s.contains("%(progress.total_bytes_estimate)s"));
         assert!(s.contains("after_move:filepath"));
         assert!(s.contains("--no-playlist"));
         assert!(s.contains(r"-P C:\dl"));

@@ -57,7 +57,7 @@ function Actions({ job }: { job: Job }) {
           title="show in explorer"
           onClick={() => void revealItemInDir(job.finalPath!).catch(() => {})}
         >
-          ❋
+          📁
         </button>
       )}
       {(job.state === "downloading" || job.state === "post" || job.state === "queued") && (
@@ -331,7 +331,9 @@ function Row({ job, index }: { job: Job; index: number }) {
         <td className="numm">{fmtSpeed(job.speedBps) || "—"}</td>
         <td className="numm">{fmtEta(job.etaSec) || "—"}</td>
         <td className="actions-cell">
-          <Actions job={job} />
+          <div className="actions-row">
+            <Actions job={job} />
+          </div>
         </td>
       </tr>
       <LogRow job={job} />

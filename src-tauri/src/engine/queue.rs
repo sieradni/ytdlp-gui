@@ -926,8 +926,12 @@ impl JobQueue {
                     );
 
                     match parse_line(&raw) {
-                        ParsedLine::Progress { downloaded, total, speed_bps, eta_sec } => {
-                            let pct = match (downloaded, total) {
+                        ParsedLine::Progress { downloaded, total, total_estimate, speed_bps, eta_sec } => {
+                            // d92: exact total wins, then the estimate — one of
+                            // the two is always NA (site-dependent), so this
+                            // covers both families.
+                            let effective_total = total.or(total_estimate);
+                            let pct = match (downloaded, effective_total) {
                                 (d, Some(t)) if t > 0 => Some((d as f64 / t as f64) * 100.0),
                                 _ => None,
                             };
@@ -1370,14 +1374,40 @@ async fn resolve_identity(
                     is_playlist,
                     title: pl_title.map(str::to_owned),
                 };
-                // single videos carry their title on a second print line
+                // single videos carry their title on a second print line.
+                // REGRESSION FIX (2026-09-08): the old code did a blocking
+                // recv() here, trusting the TITLE: line to be the NEXT line.
+                // print writes are line-buffered and stdout/stderr share the
+                // merged channel — a stderr line can interleave, and the
+                // block-recv then ATE the TITLE line and left the job
+                // titleless ("fetching…" forever in the hover card). scan
+                // forward instead, skipping stderr noise, under an absolute
+                // 500 ms grace: the identity itself is already complete, so
+                // a missing probe title only costs the display name (the
+                // run-phase output still sets one).
                 if !is_playlist {
-                    if let Some((true, l2)) = rx.recv().await {
-                        if let Some(t2) = l2.trim().strip_prefix("TITLE:") {
-                            let t2 = t2.trim();
-                            if !t2.is_empty() && t2 != "NA" {
-                                identity.title = Some(t2.to_owned());
+                    let deadline =
+                        std::time::Instant::now() + std::time::Duration::from_millis(500);
+                    loop {
+                        let now = std::time::Instant::now();
+                        if now >= deadline {
+                            break;
+                        }
+                        match tokio::time::timeout(deadline - now, rx.recv()).await {
+                            Ok(Some((true, l2))) => {
+                                if let Some(t2) = l2.trim().strip_prefix("TITLE:") {
+                                    let t2 = t2.trim();
+                                    if !t2.is_empty() && t2 != "NA" {
+                                        identity.title = Some(t2.to_owned());
+                                    }
+                                    break;
+                                }
+                                // some other stdout line — keep scanning
+                                // until TITLE, the deadline, or close
                             }
+                            Ok(Some((false, _))) => continue, // stderr noise
+                            Ok(None) => break,                // channel closed
+                            Err(_) => break,                  // grace exhausted
                         }
                     }
                 }

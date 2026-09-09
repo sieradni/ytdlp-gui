@@ -92,9 +92,22 @@ export default function App() {
     <div className="app h-full flex flex-col">
       <TabBar />
       <main className="scrollpane flex-1 min-h-0 overflow-y-auto">
-        {page === "home" && <HomePage />}
-        {page === "history" && <HistoryPage />}
-        {page === "settings" && <SettingsPage />}
+        {/* keep-alive: pages stay MOUNTED across tab switches (display:none
+            via the hidden attribute). history unmounting on every switch
+            refetched the full list and threw away scroll position + search
+            context; the home queue table also loses nothing now. cost: a
+            page's window-level listeners stay attached while hidden — any
+            global shortcut a page registers must check useUi.page first
+            (history's F5 does). */}
+        <div hidden={page !== "home"}>
+          <HomePage />
+        </div>
+        <div hidden={page !== "history"}>
+          <HistoryPage />
+        </div>
+        <div hidden={page !== "settings"}>
+          <SettingsPage />
+        </div>
       </main>
       {queueError && (
         <div className="warn" style={{ padding: "2px 14px 6px" }}>

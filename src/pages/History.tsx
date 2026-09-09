@@ -18,6 +18,7 @@ import {
   type HistoryRow,
 } from "../lib/ipc";
 import { currentOptions } from "../lib/composeMirror";
+import { useUi } from "../stores/ui";
 
 function fmtSize(bytes: number | null): string {
   if (bytes == null) return "—";
@@ -70,10 +71,22 @@ export default function HistoryPage() {
     void load();
   }, [load]);
 
-  // F5 refreshes history (§6 keyboard/ux polish)
+  // keep-alive (App.tsx): the page stays mounted across tab switches, so this
+  // effect is what keeps it FRESH — every time history becomes the visible
+  // page, re-pull with the current search. scroll position and the query box
+  // survive the switch; the row data does not go stale.
+  const page = useUi((s) => s.page);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (page === "history") void load(query || undefined);
+  }, [page]);
+
+  // F5 refreshes history (§6 keyboard/ux polish). the page is keep-alive
+  // mounted now (App.tsx), so this listener survives tab switches — it must
+  // only act while history is the VISIBLE page, or F5 would fight every tab.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "F5") {
+      if (e.key === "F5" && useUi.getState().page === "history") {
         e.preventDefault();
         void load(query || undefined);
       }
@@ -248,6 +261,7 @@ export default function HistoryPage() {
                     <td className="numm">{fmtDur(row.durationSec)}</td>
                     <td className="numm">{fmtDate(row.downloadedAt)}</td>
                     <td className="actions-cell">
+                      <div className="actions-row">
                       {isMoved || !row.finalPath ? (
                         <button
                           className="iconbtn"
@@ -286,6 +300,7 @@ export default function HistoryPage() {
                       >
                         ✕
                       </button>
+                      </div>
                     </td>
                   </tr>
                 );

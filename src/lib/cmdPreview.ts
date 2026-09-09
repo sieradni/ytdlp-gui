@@ -10,7 +10,9 @@ export function buildPreviewArgs(opts: JobOptions, dest: string, archive?: strin
   argv.push("--newline", "--progress", "--no-simulate");
   argv.push(
     "--progress-template",
-    "download:__P__%(progress.downloaded_bytes)s|%(progress.total_bytes_estimate)s|%(progress.speed)s|%(progress.eta)s",
+    // d92: both size fields — youtube exposes exact total_bytes (sabr), most
+    // other sites only total_bytes_estimate; the engine takes the first non-NA
+    "download:__P__%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.total_bytes_estimate)s|%(progress.speed)s|%(progress.eta)s",
   );
   argv.push("--print", "after_move:filepath");
   // per-item playlist index print (mirrors ENGINE_FLAGS; see args.rs —
