@@ -3,6 +3,7 @@ pub mod binaries;
 pub mod history;
 pub mod jobs;
 pub mod metadata;
+pub mod thumbs;
 
 use serde::Serialize;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -63,6 +64,8 @@ pub fn settings_save(
 pub struct AppPaths {
     pub archive_path: String,
     pub bin_dir: String,
+    /// d93: the row-thumbnail cache dir (app-data\thumbs).
+    pub thumbs_dir: String,
 }
 
 /// paths the settings page and history footer link to (§4/§6).
@@ -73,6 +76,9 @@ pub fn app_paths() -> AppPaths {
             .to_string_lossy()
             .into_owned(),
         bin_dir: crate::binaries::manager::bin_dir()
+            .to_string_lossy()
+            .into_owned(),
+        thumbs_dir: crate::engine::thumbs::cache_dir()
             .to_string_lossy()
             .into_owned(),
     }

@@ -16,6 +16,7 @@ use crate::engine::args::{build_download_argv, CookieKind, JobOptions, PlaylistM
 use crate::engine::parser::{parse_line, ParsedLine};
 use crate::engine::process;
 use crate::error::{other, AppResult};
+use crate::engine::thumbs::cache_fresh;
 use crate::store::{archive_append, archive_contains, default_archive_path, Db, JobRow};
 
 /// directory holding the app-managed ffmpeg (§4). passed to yt-dlp via
@@ -84,6 +85,9 @@ pub struct Job {
     pub title: Option<String>,
     pub format: Option<String>,
     pub final_path: Option<String>,
+    /// d93: thumbnail cache path (app-data png). set once the identity
+    /// resolves (remote art), may be replaced at done (local art).
+    pub thumb: Option<String>,
     pub pct: Option<f64>,
     pub speed_bps: Option<f64>,
     pub eta_sec: Option<u64>,
@@ -93,13 +97,16 @@ pub struct Job {
     /// no counter line seen yet.
     pub items_done: Option<u32>,
     pub items_total: Option<u32>,
+    /// d94: per-item records for playlist jobs (id/title/path/status),
+    /// written at completion. empty for single videos.
+    pub items: Vec<crate::store::JobItem>,
     /// recent output lines for the expandable row (§6).
     pub output: Vec<String>,
     pub created_at: i64,
 }
 
 impl Job {
-    fn from_row(row: &JobRow, output: Vec<String>) -> Self {
+    fn from_row(row: &JobRow, output: Vec<String>, items: Vec<crate::store::JobItem>) -> Self {
         Job {
             id: row.id.clone(),
             url: url_of_options(&row.options),
@@ -107,6 +114,7 @@ impl Job {
             title: row.title.clone(),
             format: row.format.clone(),
             final_path: row.final_path.clone(),
+            thumb: row.thumb.clone(),
             pct: row.pct,
             speed_bps: row.speed_bps,
             eta_sec: row.eta_sec,
@@ -114,6 +122,8 @@ impl Job {
             skipped: row.skipped,
             items_done: row.items_done,
             items_total: row.items_total,
+            // d94: per-item records (playlist jobs) — empty for single videos
+            items,
             output,
             created_at: row.created_at,
         }
@@ -178,6 +188,31 @@ struct QueueInner {
     urls: HashSet<String>,
 }
 
+impl QueueInner {
+    /// d96: the dispatcher's gate-check + slot-claim step, as ONE method on
+    /// the guarded state. the e2e TOCTOU (S15, 2026-09-28): the old
+    /// dispatcher checked `paused` in one lock scope and inserted into
+    /// `running` in a second, so queue_pause() could interleave between
+    /// them — a job decided at the pause instant still started. with the
+    /// claim expressed here, the dispatcher can only run it while holding
+    /// the lock: a job either starts wholly before the pause or waits for
+    /// resume (D34's contract). `oldest_queued` is the db's oldest "queued"
+    /// row, or None when the queue is empty.
+    fn claim_next(
+        &mut self,
+        oldest_queued: Option<JobRow>,
+    ) -> Option<(String, String, String, mpsc::UnboundedReceiver<()>)> {
+        if self.paused || self.running.len() >= self.concurrency {
+            return None;
+        }
+        oldest_queued.map(|r| {
+            let (tx, rx) = mpsc::unbounded_channel();
+            self.running.insert(r.id.clone(), tx);
+            (r.id, r.options, r.dest, rx)
+        })
+    }
+}
+
 /// add_urls feedback: (queued jobs, invalid (line, reason) pairs, dupes).
 pub type AddFeedbackParts = (Vec<Job>, Vec<(String, String)>, usize);
 
@@ -222,9 +257,19 @@ impl JobQueue {
             .iter()
             .map(|r| {
                 let out = logs.get(&r.id).cloned().unwrap_or_default();
-                Job::from_row(r, out)
+                // d94: playlist jobs carry their per-item records; the db
+                // hits only fire for jobs that ever had items (empty result
+                // for single videos is one indexed primary-key query).
+                let items = self.db.list_job_items(&r.id).unwrap_or_default();
+                Job::from_row(r, out, items)
             })
             .collect())
+    }
+
+    /// d94: per-item records for one job (playlist tracks). empty for
+    /// single videos.
+    pub fn list_items(&self, id: &str) -> AppResult<Vec<crate::store::JobItem>> {
+        self.db.list_job_items(id)
     }
 
     pub fn is_paused(&self) -> bool {
@@ -291,6 +336,7 @@ impl JobQueue {
                         format: None,
                         final_path: None,
                         vid: None,
+                        thumb: None,
                         pct: None,
                         speed_bps: None,
                         eta_sec: None,
@@ -302,7 +348,7 @@ impl JobQueue {
                         updated_at: now,
                     };
                     self.db.insert_job(&row)?;
-                    jobs.push(Job::from_row(&row, Vec::new()));
+                    jobs.push(Job::from_row(&row, Vec::new(), Vec::new()));
                 }
             }
         }
@@ -364,6 +410,9 @@ impl JobQueue {
             }
         }
         self.db.update_job(id, row)?;
+        // d94: the previous attempt's item records must not outlive their
+        // run — a retried job rebuilds them (or shows none until it does).
+        let _ = self.db.delete_job_items(id);
         self.emit_queue_changed();
         Ok(())
     }
@@ -380,6 +429,7 @@ impl JobQueue {
         }
         let url = url_of_options(&row.options);
         self.db.delete_job(id)?;
+        let _ = self.db.delete_job_items(id);
         self.logs.lock().expect("logs lock").remove(id);
         let mut inner = self.inner.lock().expect("queue lock");
         inner.running.remove(id);
@@ -429,26 +479,30 @@ impl JobQueue {
         tauri::async_runtime::spawn(async move {
             loop {
                 tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                // gate check and slot claim are ONE atomic step under the
+                // lock: with the claim in a second acquisition, pause()
+                // could interleave between the check and the insert and a
+                // job decided at the pause instant still started (TOCTOU
+                // e2e S15 caught live 2026-09-28 — the paused witness
+                // dispatched microseconds before paused=true landed).
+                // linearized: a job either starts wholly before the pause
+                // or waits for resume (D34's contract). pinned by the
+                // dispatcher test below.
                 let next = {
-                    let inner = q.inner.lock().expect("queue lock");
-                    if inner.paused || inner.running.len() >= inner.concurrency {
-                        None
-                    } else {
-                        // oldest queued first (insertion order, §6 default)
-                        q.db.list_jobs()
-                            .ok()
-                            .and_then(|rows| rows.into_iter().find(|r| r.state == "queued"))
-                            .map(|r| (r.id, r.options, r.dest))
-                    }
+                    let mut inner = q.inner.lock().expect("queue lock");
+                    // the db read stays inside the same critical section:
+                    // claim_next verifies the gate and reserves the slot
+                    // atomically with the oldest-queued pick (d96; a db
+                    // read under the lock is fine — no awaits, no
+                    // re-entrancy).
+                    let oldest = q.db
+                        .list_jobs()
+                        .ok()
+                        .and_then(|rows| rows.into_iter().find(|r| r.state == "queued"));
+                    inner.claim_next(oldest)
                 };
-                if let Some((id, options, dest)) = next {
+                if let Some((id, options, dest, rx)) = next {
                     let q2 = Arc::clone(&q);
-                    let (tx, rx) = mpsc::unbounded_channel();
-                    q.inner
-                        .lock()
-                        .expect("queue lock")
-                        .running
-                        .insert(id.clone(), tx);
                     tokio::spawn(async move {
                         q2.run_job(id, options, dest, rx).await;
                     });
@@ -616,6 +670,36 @@ impl JobQueue {
                     row.updated_at = crate::store::now_unix();
                     self.save_row(&row);
                     self.emit_update(&row);
+                    // d93: an archive-skip is a done row — it deserves art too.
+                    // the file's location is unknown from here, so the remote
+                    // probe runs (fresh-cache check keeps repeats free); when
+                    // a later real download lands, its done-sweep replaces
+                    // this with locally extracted art.
+                    {
+                        let app = self.app.clone();
+                        let db = Arc::clone(&self.db);
+                        let id2 = id.clone();
+                        let key = key.to_owned();
+                        let (ex, vid) = key.split_once(' ').map(|(a, b)| (a.to_owned(), b.to_owned())).unwrap_or_default();
+                        let url2 = url.clone();
+                        let ex2 = ex.clone();
+                        let cookies = opts.cookies.clone();
+                        tauri::async_runtime::spawn(async move {
+                            if let Some(p) = crate::engine::thumbs::ensure_remote_art(
+                                &key, &vid, &url2, &ex2, Some(&cookies),
+                            )
+                            .await
+                            {
+                                let ps = p.to_string_lossy().into_owned();
+                                let _ = db.set_job_thumb(&id2, Some(&ps));
+                                let _ = db.set_history_thumb(&ex, &vid, Some(&ps));
+                                let _ = app.emit(
+                                    "job:update",
+                                    serde_json::json!({ "id": id2, "thumb": ps }),
+                                );
+                            }
+                        });
+                    }
                     self.cleanup_running(&id, &url, Some(key));
                     self.emit_queue_changed();
                     return;
@@ -635,6 +719,37 @@ impl JobQueue {
                         "job:update",
                         serde_json::json!({ "id": id, "state": "fetching", "title": row.title }),
                     );
+                }
+            }
+
+            // d93: remote artwork — the identity is known before any bytes
+            // move, so the row can show art while it downloads. youtube
+            // resolves off the i.ytimg lookup table (zero yt-dlp cost); other
+            // extractors run one --print probe in the background. every
+            // failure degrades to "no thumbnail"; nothing can fail the job.
+            if let Some(i) = identity.as_ref() {
+                if !cache_fresh(&i.key()) {
+                    let app = self.app.clone();
+                    let db = Arc::clone(&self.db);
+                    let id2 = id.clone();
+                    let key = i.key();
+                    let vid = i.id.clone();
+                    let url2 = url.clone();
+                    let ex = i.extractor.clone();
+                    let cookies = opts.cookies.clone();
+                    tauri::async_runtime::spawn(async move {
+                        if let Some(p) = crate::engine::thumbs::ensure_remote_art(
+                            &key, &vid, &url2, &ex, Some(&cookies),
+                        )
+                        .await
+                        {
+                            let _ = db.set_job_thumb(&id2, Some(&p.to_string_lossy()));
+                            let _ = app.emit(
+                                "job:update",
+                                serde_json::json!({ "id": id2, "thumb": p.to_string_lossy() }),
+                            );
+                        }
+                    });
                 }
             }
 
@@ -679,7 +794,14 @@ impl JobQueue {
         }
 
         self.set_state(&id, JobState::Downloading).await;
-        let outcome = self.spawn_and_stream(&id, &argv, &mut stop_rx).await;
+        let outcome = self
+            .spawn_and_stream(
+                &id,
+                &argv,
+                &mut stop_rx,
+                identity.as_ref().map(|i| (i.is_playlist, i.extractor.as_str())),
+            )
+            .await;
 
         // ---- finalize ----
         match outcome {
@@ -703,6 +825,8 @@ impl JobQueue {
                 items_done,
                 items_total,
                 skipped_existing,
+                items: run_items,
+                channel: run_channel,
             } => {
                 // d62: done means evidence. the after_move:filepath print can
                 // be swallowed (hostile titles defeat any heuristic; custom
@@ -769,8 +893,9 @@ impl JobQueue {
                             extractor: ex.to_owned(),
                             vid: vid.to_owned(),
                             url: Some(url.clone()),
-                            title: title.clone().or_else(|| self.row(&id).title),
-                            channel: None,
+                            title: title.clone().or_else(|| self.row(&id).title),                                // d94: the channel print finally feeds the dead
+                                // column (upsert COALESCE keeps an older value)
+                                channel: run_channel.clone(),
                             duration_sec: meta.as_ref().and_then(|m| m.duration_sec).map(i64::from),
                             size_bytes: meta
                                 .as_ref()
@@ -780,6 +905,10 @@ impl JobQueue {
                                 .as_deref()
                                 .and_then(crate::engine::probe::format_label),
                             final_path: final_path.clone(),
+                            // d93: null here — the done-sweep below sets the
+                            // thumb after local extraction (and COALESCE in
+                            // upsert_history keeps any existing value).
+                            thumb: None,
                             error: None,
                             downloaded_at: crate::store::now_unix(),
                         };
@@ -787,6 +916,110 @@ impl JobQueue {
                             self.push_log(&id, format!("history write failed: {e}"));
                         }
                     }
+                }
+                // d94: playlist jobs now leave a trace too — a playlist-level
+                // history row (D54 kept the per-item archive writes; this adds
+                // the missing playlist record, so history shows playlists and
+                // their re-download affordance works). counts come from the
+                // run; the row's ✕-remove stays archive-noop (yt-dlp owns the
+                // per-item archive entries).
+                if is_playlist {
+                    if let Some(key) = &identity_key {
+                        if let Some((ex, vid)) = key.split_once(' ') {
+                            let h = crate::store::HistoryRow {
+                                extractor: ex.to_owned(),
+                                vid: vid.to_owned(),
+                                url: Some(url.clone()),
+                                title: title.clone().or_else(|| self.row(&id).title),
+                                channel: run_channel.clone(),
+                                duration_sec: None,
+                                size_bytes: None,
+                                // count every processed item (done + skipped):
+                                // a fully-archived replay downloads nothing but
+                                // still ran 10 tracks — "0 items" would lie.
+                                format: Some(format!("playlist · {} items", run_items.len())),
+                                final_path: None,
+                                thumb: None, // the fetch-phase art already cached; COALESCE keeps it
+                                error: None,
+                                downloaded_at: crate::store::now_unix(),
+                            };
+                            if let Err(e) = self.db.upsert_history(&h) {
+                                self.push_log(&id, format!("history write failed: {e}"));
+                            }
+                        }
+                    }
+                }
+                // d94: persist the run's per-item records (playlist jobs) and
+                // extract local art for each item that produced a real file.
+                // playlist-gated: singles never produce track records (their
+                // art is handled by the final_path sweep above).
+                if is_playlist && !run_items.is_empty() {
+                    let items = {
+                        let mut v: Vec<crate::store::JobItem> = run_items;
+                        v.sort_by_key(|it| it.idx);
+                        v
+                    };
+                    let _ = self.db.replace_job_items(&id, &items);
+                    let _ = self.app.emit(
+                        "job:update",
+                        serde_json::json!({
+                            "id": id,
+                            "items": self.db.list_job_items(&id).unwrap_or_default(),
+                        }),
+                    );
+                    for it in items.iter().filter(|it| it.status == "done") {
+                        if let (Some(path), Some((ex, vid))) = (&it.path, identity_key.as_deref().and_then(|k| k.split_once(' '))) {
+                            let app = self.app.clone();
+                            let db = Arc::clone(&self.db);
+                            let id2 = id.clone();
+                            let path = path.clone();
+                            let idx = it.idx;
+                            let item_key = format!("{ex} p{vid}i{idx}");
+                            tauri::async_runtime::spawn(async move {
+                                if let Some(p) = crate::engine::thumbs::ensure_local_art(
+                                    &item_key,
+                                    std::path::Path::new(&path),
+                                )
+                                .await
+                                {
+                                    let _ = db.set_job_thumb(&id2, Some(&p.to_string_lossy()));
+                                    let _ = app.emit(
+                                        "job:update",
+                                        serde_json::json!({ "id": id2, "thumb": p.to_string_lossy() }),
+                                    );
+                                }
+                            });
+                        }
+                    }
+                }
+                // d93: local art — prefer what the FINISHED file carries
+                // (embedded cover for audio, a real frame for video). this
+                // matches the actual download, unlike remote art, and works
+                // offline. runs off-thread; failure keeps the remote thumb.
+                if let Some(path) = &final_path {
+                    let app = self.app.clone();
+                    let db = Arc::clone(&self.db);
+                    let id2 = id.clone();
+                    let key = identity_key.clone();
+                    let path = path.clone();
+                    tauri::async_runtime::spawn(async move {
+                        if let Some(k) = key {
+                            if let Some(p) =
+                                crate::engine::thumbs::ensure_local_art(&k, std::path::Path::new(&path))
+                                    .await
+                            {
+                                let ps = p.to_string_lossy().into_owned();
+                                let _ = db.set_job_thumb(&id2, Some(&ps));
+                                if let Some((ex, vid)) = k.split_once(' ') {
+                                    let _ = db.set_history_thumb(ex, vid, Some(&ps));
+                                }
+                                let _ = app.emit(
+                                    "job:update",
+                                    serde_json::json!({ "id": id2, "thumb": ps }),
+                                );
+                            }
+                        }
+                    });
                 }
                 let mut row = self.row(&id);
                 row.state = "done".into();
@@ -851,11 +1084,14 @@ impl JobQueue {
     }
 
     /// spawn yt-dlp, stream lines, drive per-job state; returns the outcome.
+    /// `playlist` = (is_playlist, extractor): d94's per-item records and
+    /// item-thumb surface only apply to playlist jobs.
     async fn spawn_and_stream(
         &self,
         id: &str,
         argv: &[String],
         stop_rx: &mut mpsc::UnboundedReceiver<()>,
+        playlist: Option<(bool, &str)>,
     ) -> RunOutcome {
         let mut child = match process::spawn(argv) {
             Ok(c) => c,
@@ -887,11 +1123,43 @@ impl JobQueue {
         // downloaded" and exits 0 without touching the file. (playlist skips
         // are per-item truth and flow through PlaylistSkip instead.)
         let mut skipped_existing = false;
+        // d94: per-item records for playlist jobs (the ui's expando shows
+        // the tracks) + the run's channel (first item's, feeds history).
+        // a map so the 200ms emit-throttle can't duplicate ids.
+        let mut collected_items: std::collections::HashMap<String, crate::store::JobItem> =
+            std::collections::HashMap::new();
+        let mut last_channel: Option<String> = None;
+        let mut last_item_vid: Option<String> = None;
+        // d94: a __N__ title that arrives before any __I__ (single videos)
+        // parks here until the item identity is known.
+        let mut last_pending_title: Option<String> = None;
 
         loop {
             tokio::select! {
                 _ = stop_rx.recv() => {
                     child.kill().await;
+                    // d94/ADVERSARIAL-REVIEW: a stopped playlist keeps the
+                    // records of items that FINISHED (real path) or were
+                    // ARCHIVE-SKIPPED (status=skipped — they never get a path
+                    // but were genuinely processed); started-but-unfinished
+                    // items are dropped — the list must never claim a file
+                    // that isn't there.
+                    if playlist.is_some_and(|(is_pl, _)| is_pl) && !collected_items.is_empty() {
+                        let finished: Vec<crate::store::JobItem> = collected_items
+                            .into_values()
+                            .filter(|it| it.path.is_some() || it.status == "skipped")
+                            .collect();
+                        if !finished.is_empty() {
+                            let _ = self.db.replace_job_items(id, &finished);
+                            let _ = self.app.emit(
+                                "job:update",
+                                serde_json::json!({
+                                    "id": id,
+                                    "items": self.db.list_job_items(id).unwrap_or_default(),
+                                }),
+                            );
+                        }
+                    }
                     return RunOutcome::Stopped;
                 }
                 line = rx.recv() => {
@@ -899,6 +1167,8 @@ impl JobQueue {
                         // both streams closed — reap the exit status
                         let status = child.inner.wait().await;
                         let items_done = (items_done > 0).then_some(items_done);
+                        let run_items: Vec<crate::store::JobItem> =
+                            collected_items.into_values().collect();
                         return match status {
                             Ok(s) if s.success() => RunOutcome::Done {
                                 final_path,
@@ -906,6 +1176,8 @@ impl JobQueue {
                                 items_done,
                                 items_total,
                                 skipped_existing,
+                                items: run_items,
+                                channel: last_channel,
                             },
                             Ok(s) => RunOutcome::Error(
                                 last_error.unwrap_or_else(|| format!("yt-dlp exited with {s}")),
@@ -976,7 +1248,75 @@ impl JobQueue {
                             // completion (D54). single videos overwrite
                             // harmlessly; playlists accumulate per item.
                             if seen_items.insert(p.clone()) {
-                                final_path = Some(p);
+                                // d94/ADVERSARIAL-REVIEW: the item's vid comes
+                                // from the FILENAME's `[<id>]` marker (the
+                                // engine's own output-template token), never
+                                // from "last seen item-start" — a fast track
+                                // whose metadata lagged would otherwise attach
+                                // its file to the wrong (next) item.
+                                let item_vid = std::path::Path::new(&p)
+                                    .file_stem()
+                                    .and_then(|s| s.to_str())
+                                    .and_then(|stem| {
+                                        stem.rsplit(" [")
+                                            .next()
+                                            .and_then(|tail| tail.strip_suffix(']'))
+                                            .filter(|v| {
+                                                !v.is_empty()
+                                                    && v.len() <= 64
+                                                    && v.chars().all(|c| {
+                                                        c.is_ascii_alphanumeric()
+                                                            || c == '-'
+                                                            || c == '_'
+                                                    })
+                                            })
+                                            .map(str::to_owned)
+                                    })
+                                    .or_else(|| last_item_vid.clone())
+                                    .unwrap_or_default();
+                                // records are playlist-only: a single video's
+                                // marker-derived entry would write pointless
+                                // job_items rows and flash a "tracks" section
+                                // in its expando (the existing single-video
+                                // final_path art sweep already covers singles).
+                                if playlist.is_some_and(|(is_pl, _)| is_pl) && !item_vid.is_empty() {
+                                    let next_idx = collected_items.len() as u32 + 1;
+                                    let entry = collected_items.entry(item_vid.clone()).or_insert(crate::store::JobItem {
+                                        idx: next_idx,
+                                        vid: item_vid.clone(),
+                                        title: None,
+                                        path: None,
+                                        status: "done".into(),
+                                    });
+                                    entry.path = Some(p.clone());
+                                    entry.status = "done".into();
+                                    if entry.title.is_none() {
+                                        entry.title = last_pending_title.take();
+                                    }
+                                    // IMMEDIATE emission (not throttled): the
+                                    // track list must reflect reality as lines
+                                    // land; a fast track between two 200ms
+                                    // samples is otherwise invisible.
+                                    let _ = self.app.emit(
+                                        "job:update",
+                                        serde_json::json!({
+                                            "id": id, "state": "downloading",
+                                            "itemsDone": items_done.saturating_add(1),
+                                            "itemsTotal": items_total,
+                                            "itemTitle": entry.title,
+                                            "item": entry.clone(),
+                                        }),
+                                    );
+                                }
+                                final_path = Some(p.clone());
+                                // d94: playlist jobs point their row's reveal
+                                // affordance at the item's real file.
+                                if playlist.is_some_and(|(is_pl, _)| is_pl) {
+                                    let mut row = self.row(id);
+                                    row.final_path = Some(p.clone());
+                                    row.updated_at = crate::store::now_unix();
+                                    self.save_row(&row);
+                                }
                                 items_done = items_done.saturating_add(1);
                                 if last_emit.elapsed().as_millis() >= 200 {
                                     last_emit = std::time::Instant::now();
@@ -1023,8 +1363,18 @@ impl JobQueue {
                                 );
                             }
                         }
-                        ParsedLine::PlaylistSkip { .. } => {
-                            // archive-skipped items count as processed (D54)
+                        ParsedLine::PlaylistSkip { id: skip_id, title: skip_title } => {
+                            // archive-skipped items count as processed (D54);
+                            // d94: recorded with their title — the skip line is
+                            // the only per-item signal these items produce.
+                            let next_idx = collected_items.len() as u32 + 1;
+                            collected_items.entry(skip_id.clone()).or_insert(crate::store::JobItem {
+                                idx: next_idx,
+                                vid: skip_id.clone(),
+                                title: skip_title.clone(),
+                                path: None,
+                                status: "skipped".into(),
+                            });
                             items_done = items_done.saturating_add(1);
                             if last_emit.elapsed().as_millis() >= 200 {
                                 last_emit = std::time::Instant::now();
@@ -1045,7 +1395,61 @@ impl JobQueue {
                                 self.save_row(&row);
                             }
                         }
-                        ParsedLine::Destination(_) | ParsedLine::ItemStart { .. } => {}
+                        ParsedLine::Channel { channel, uploader } => {
+                            // d94: the run's uploader — youtube fills channel,
+                            // bandcamp fills uploader (live-verified); prefer
+                            // channel. single videos flow here too.
+                            if last_channel.is_none() {
+                                last_channel = Some(channel.or(uploader).unwrap_or_default());
+                                if last_channel.as_deref() == Some("") {
+                                    last_channel = None;
+                                }
+                            }
+                        }
+                        ParsedLine::ItemTitle(item_title) => {
+                            // d94: per-item title from the engine's __N__ print
+                            // — the ONLY per-item title signal in normal runs
+                            // (the verbose-gated `[download] <id>: <title>`
+                            // line never appears without -v). the item's vid
+                            // is not known yet (it arrives with the file path),
+                            // so the title parks until then; the emission is
+                            // IMMEDIATE — a fast track between two throttled
+                            // samples must still show what is playing.
+                            last_pending_title = Some(item_title.clone());
+                            let _ = self.app.emit(
+                                "job:update",
+                                serde_json::json!({
+                                    "id": id, "state": "downloading", "itemTitle": item_title,
+                                }),
+                            );
+                        }
+                        ParsedLine::ItemStart { id: start_id, title } => {
+                            // verbose-mode per-item line — a valid item start
+                            // when it appears (-v); absent in normal runs.
+                            last_item_vid = Some(start_id.clone());
+                            let next_idx = collected_items.len() as u32 + 1;
+                            let entry = collected_items.entry(start_id.clone()).or_insert(crate::store::JobItem {
+                                idx: next_idx,
+                                vid: start_id.clone(),
+                                title: title.clone().or_else(|| last_pending_title.take()),
+                                path: None,
+                                status: "done".into(),
+                            });
+                            if entry.title.is_none() {
+                                if let Some(t) = title.clone().or_else(|| last_pending_title.take()) {
+                                    entry.title = Some(t);
+                                }
+                            }
+                            let _ = self.app.emit(
+                                "job:update",
+                                serde_json::json!({
+                                    "id": id, "state": "downloading",
+                                    "itemsDone": items_done, "itemsTotal": items_total,
+                                    "itemTitle": entry.title,
+                                }),
+                            );
+                        }
+                        ParsedLine::Destination(_) => {}
                         ParsedLine::Stage("post") => {
                             self.set_state(id, JobState::Post).await;
                         }
@@ -1080,6 +1484,7 @@ impl JobQueue {
                 format: None,
                 final_path: None,
                 vid: None,
+                thumb: None,
                 pct: None,
                 speed_bps: None,
                 eta_sec: None,
@@ -1121,6 +1526,7 @@ impl JobQueue {
         row.error = msg.clone();
         row.speed_bps = None;
         row.eta_sec = None;
+        row.thumb = None;
         row.updated_at = crate::store::now_unix();
         self.save_row(&row);
         // d88: postprocessor debris cleanup — after the row save (fresh vid
@@ -1225,6 +1631,9 @@ enum RunOutcome {
         /// d89: yt-dlp printed "has already been downloaded" — the run moved
         /// no bytes and left the existing file as-is.
         skipped_existing: bool,
+        /// d94: per-item records (playlist jobs) + the run's channel.
+        items: Vec<crate::store::JobItem>,
+        channel: Option<String>,
     },
     Stopped,
     Error(String),
@@ -1654,6 +2063,7 @@ mod tests {
             format: Some("opus".into()),
             final_path: Some(r"C:\old\t [x].opus".into()),
             vid: Some("x".into()),
+            thumb: Some(r"C:\data\thumbs\youtube_x.png".into()),
             pct: Some(41.0),
             speed_bps: Some(999.0),
             eta_sec: Some(12),
@@ -1748,5 +2158,85 @@ mod tests {
         ] {
             assert_eq!(JobState::from_str(s.as_str()), s);
         }
+    }
+
+    /// d96 pin: the paused gate and the slot claim are one atomic step —
+    /// `queue_pause()` (which flips the same bool under the same lock) can
+    /// never interleave between "gate open" and "slot taken". the old
+    /// two-acquisition shape let a job start AT the pause instant (e2e
+    /// S15 caught it live); this method makes that shape unrepresentable
+    /// from the dispatcher, and these asserts pin the semantics.
+    fn d96_row(id: &str) -> JobRow {
+        JobRow {
+            id: id.into(),
+            options: options_with_url(&JobOptions::default(), "https://youtu.be/x"),
+            dest: r"C:\dl".into(),
+            state: "queued".into(),
+            title: None,
+            format: None,
+            final_path: None,
+            vid: None,
+            thumb: None,
+            pct: None,
+            speed_bps: None,
+            eta_sec: None,
+            error: None,
+            skipped: false,
+            items_done: None,
+            items_total: None,
+            created_at: 1,
+            updated_at: 1,
+        }
+    }
+
+    #[test]
+    fn claim_next_refuses_when_paused_d96() {
+        let mut inner = QueueInner {
+            paused: true,
+            concurrency: 2,
+            running: HashMap::new(),
+            identities: HashSet::new(),
+            urls: HashSet::new(),
+        };
+        // paused with a queued job and free slots: NOTHING claims — pause()
+        // landing before the dispatcher's lock acquire must hold forever
+        // (until resume), not just until the next lock round.
+        assert!(inner.claim_next(Some(d96_row("j1"))).is_none());
+        assert!(inner.running.is_empty());
+        inner.paused = false;
+        // resume → the same claim now goes through
+        let claimed = inner.claim_next(Some(d96_row("j1")));
+        assert!(claimed.is_some());
+        assert_eq!(inner.running.len(), 1);
+    }
+
+    #[test]
+    fn claim_next_refuses_at_concurrency_d96() {
+        let mut inner = QueueInner {
+            paused: false,
+            concurrency: 1,
+            running: HashMap::new(),
+            identities: HashSet::new(),
+            urls: HashSet::new(),
+        };
+        let first = inner.claim_next(Some(d96_row("j1"))).expect("first claim");
+        assert_eq!(first.0, "j1");
+        // slots full: no second claim, even with another queued row
+        assert!(inner.claim_next(Some(d96_row("j2"))).is_none());
+        assert_eq!(inner.running.len(), 1);
+        drop(first); // receiver dropped — the run loop owns it in real life
+    }
+
+    #[test]
+    fn claim_next_empty_queue_claims_nothing_d96() {
+        let mut inner = QueueInner {
+            paused: false,
+            concurrency: 2,
+            running: HashMap::new(),
+            identities: HashSet::new(),
+            urls: HashSet::new(),
+        };
+        assert!(inner.claim_next(None).is_none());
+        assert!(inner.running.is_empty());
     }
 }

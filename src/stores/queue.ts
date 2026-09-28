@@ -9,6 +9,7 @@ import {
   queuePause,
   queueResume,
   type Job,
+  type JobItem,
   type JobOptions,
   type JobState,
 } from "../lib/ipc";
@@ -183,7 +184,11 @@ export const useQueue = create<QueueState>((set, get) => ({
   resume: async () => set({ paused: await queueResume() }),
 
   attach: async () => {
-    const onJobUpdate = await listen<Partial<Job> & { id: string; state?: JobState }>(
+    // d94: `item` (singular) is one just-completed track; `items` a full
+    // replacement snapshot (post-stop). both are outside Partial<Job>.
+    const onJobUpdate = await listen<
+      Partial<Job> & { id: string; state?: JobState; item?: JobItem; items?: JobItem[] }
+    >(
       "job:update",
       (e) => {
         const p = e.payload;
@@ -221,9 +226,24 @@ export const useQueue = create<QueueState>((set, get) => ({
               p.state != null && STATE_RANK[p.state] < STATE_RANK[j.state];
             const state = staleDowngrade ? j.state : incoming;
             const clearProgress = staleDowngrade;
+            // d94/ADVERSARIAL-REVIEW: the track list is REAL-TIME. the engine
+            // emits either one completed item (`item`) as its file lands or a
+            // full snapshot (`items`) after a stop; both merge into the job
+            // immediately instead of waiting for the terminal reload.
+            let items = j.items ?? [];
+            if (p.item) {
+              const upsert = p.item as JobItem;
+              items = items.some((it) => it.vid === upsert.vid)
+                ? items.map((it) => (it.vid === upsert.vid ? { ...it, ...upsert } : it))
+                : [...items, upsert].sort((a, b) => a.idx - b.idx || a.vid.localeCompare(b.vid));
+            } else if (p.items) {
+              const incomingItems = p.items as JobItem[];
+              items = incomingItems;
+            }
             return {
               ...j,
               state,
+              items,
               pct: clearProgress ? null : (p.pct ?? j.pct),
               speedBps: clearProgress ? null : "speedBps" in p ? (p.speedBps ?? null) : j.speedBps,
               etaSec: clearProgress ? null : "etaSec" in p ? (p.etaSec ?? null) : j.etaSec,
@@ -232,6 +252,11 @@ export const useQueue = create<QueueState>((set, get) => ({
               fetchMs: "fetchMs" in p ? (p.fetchMs ?? null) : j.fetchMs,
               title: p.title ?? j.title,
               finalPath: p.finalPath ?? j.finalPath,
+              // d93: the background thumb fetch emits its path when done;
+              // sticky — a later event without a thumb never erases one
+              thumb: p.thumb ?? j.thumb,
+              // d94: "now downloading item N" — surfaces in the row's meta
+              itemTitle: "itemTitle" in p ? (p.itemTitle ?? null) : j.itemTitle ?? null,
               error: "error" in p ? (p.error ?? null) : j.error,
               skipped: p.skipped ?? j.skipped,
               itemsDone: "itemsDone" in p ? (p.itemsDone ?? null) : j.itemsDone,

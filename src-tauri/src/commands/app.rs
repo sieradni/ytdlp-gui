@@ -52,6 +52,9 @@ pub fn app_reset_data(
     let conn = db.conn_for_maintenance();
     let jobs_cleared = conn.execute("DELETE FROM jobs", [])? as u64;
     let history_cleared = conn.execute("DELETE FROM history", [])? as u64;
+    // d94: the jobs' per-item records go with them (job_id is a job id;
+    // orphaned rows would point at nothing).
+    conn.execute("DELETE FROM job_items", [])?;
     conn.execute("VACUUM", [])?;
     drop(conn);
 
@@ -63,6 +66,10 @@ pub fn app_reset_data(
 
     // the archive is app data (D75) — reset clears it like everything else.
     let archive_removed = std::fs::remove_file(&archive_path).is_ok();
+
+    // d93: the thumbnail cache is app data too — wipe it (rows are already
+    // gone; the files would only be dead weight until a re-download refetches).
+    let _thumbs_removed = crate::engine::thumbs::clear_cache();
 
     Ok(ResetReport {
         settings_removed,
@@ -186,6 +193,8 @@ pub fn e2e_artifacts_remove(
     let mut jobs_removed = 0u64;
     for id in &ids {
         jobs_removed += conn.execute("DELETE FROM jobs WHERE id=?1", [id])? as u64;
+        // d94: the job's per-item records go with it
+        conn.execute("DELETE FROM job_items WHERE job_id=?1", [id])?;
     }
 
     let mut stmt = conn.prepare("SELECT extractor, vid, final_path FROM history")?;

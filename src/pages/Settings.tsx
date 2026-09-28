@@ -4,7 +4,7 @@ import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { useEffect, useState } from "react";
 import { getVersion } from "@tauri-apps/api/app";
-import { appResetData, effectiveDestination, type ResetReport } from "../lib/ipc";
+import { appResetData, effectiveDestination, thumbsStats, type ResetReport, type ThumbsStats } from "../lib/ipc";
 import { useAppUpdate } from "../lib/appUpdate";
 import { useBinaries } from "../stores/binaries";
 import { useQueue } from "../stores/queue";
@@ -77,6 +77,8 @@ export default function SettingsPage() {
           <div className="row flex items-center gap-2 min-w-0">
             <ArchiveReveal />
           </div>
+          <label>thumbnails</label>
+          <ThumbsRow />
         </div>
       </div>
 
@@ -225,6 +227,38 @@ function OutputFolderRow() {
       <button className="btn sm" disabled={picking} onClick={() => void pick()}>
         browse…
       </button>
+    </div>
+  );
+}
+
+/** d93: the row-thumbnail cache — count/size diagnostics plus a reveal.
+ * art is written engine-side; reset wipes it with everything else. */
+function ThumbsRow() {
+  const [stats, setStats] = useState<ThumbsStats | null>(null);
+  const [dir, setDir] = useState<string | null>(null);
+  useEffect(() => {
+    let alive = true;
+    void thumbsStats().then((s) => alive && setStats(s)).catch(() => {});
+    void import("../lib/ipc").then(({ appPaths }) =>
+      appPaths().then((p) => alive && setDir(p.thumbsDir)).catch(() => {}),
+    );
+    return () => {
+      alive = false;
+    };
+  }, []);
+  const fmt = (n: number) => (n >= 1048576 ? `${(n / 1048576).toFixed(1)} mb` : `${Math.max(1, Math.round(n / 1024))} kb`);
+  return (
+    <div className="row flex items-center gap-2 min-w-0">
+      <span className="hint">
+        {stats ? `${stats.entries} cached · ${fmt(stats.bytes)}` : "…"}
+        {" — artwork shown on queue & history rows; fetched once per item"}
+      </span>
+      <span className="grow" />
+      {dir && (
+        <button className="btn sm ghost" onClick={() => void revealItemInDir(dir)}>
+          reveal
+        </button>
+      )}
     </div>
   );
 }

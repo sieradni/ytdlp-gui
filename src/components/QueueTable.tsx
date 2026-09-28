@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { useQueue, type SortKey } from "../stores/queue";
 import type { Job } from "../lib/ipc";
+import { Thumb } from "./Thumb";
 
 /** C7: reveal-in-explorer whenever a real file exists behind the row
  * (done, skipped, or error-with-file). async probe like history's —
@@ -103,7 +104,36 @@ function LogRow({ job }: { job: Job }) {
   if (!open) return null;
   return (
     <tr className="log-row">
-      <td colSpan={6}>
+      <td colSpan={7}>
+        {/* d94: playlist jobs list the actual tracks — id, title, and a
+            per-item reveal. status: skipped items are dimmed with a marker. */}
+        {job.items.length > 0 && (
+          <div className="itemlist">
+            <div className="itemlist-h">
+              tracks ({job.items.filter((it) => it.status === "done").length} downloaded
+              {job.items.some((it) => it.status === "skipped") &&
+                `, ${job.items.filter((it) => it.status === "skipped").length} skipped`})
+            </div>
+            {job.items.map((it) => (
+              <div key={it.vid} className={"itemlist-row" + (it.status === "skipped" ? " skipped" : "")}>
+                <span className="itemlist-idx">{it.idx}</span>
+                <span className="itemlist-title" title={it.title ?? it.vid}>
+                  {it.title ?? it.vid}
+                </span>
+                {it.status === "skipped" && <span className="itemlist-badge">in archive</span>}
+                {it.path && (
+                  <button
+                    className="iconbtn"
+                    title="show this file in explorer"
+                    onClick={() => void revealItemInDir(it.path!).catch(() => {})}
+                  >
+                    📁
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
         <div className="logwrap" ref={ref}>
           {job.output.map((l, i) => (
             <div key={i} style={l.startsWith("ERROR") ? { color: "var(--red)" } : undefined}>
@@ -278,6 +308,9 @@ function Row({ job, index }: { job: Job; index: number }) {
         data-flash={doneFlash ? "done" : undefined}
       >
         <td className="idx">{index + 1}</td>
+        <td className="thumbcell">
+          <Thumb src={job.thumb} title={job.title} />
+        </td>
         <td
           onMouseEnter={onRowEnter}
           onMouseLeave={onRowLeave}
@@ -294,7 +327,12 @@ function Row({ job, index }: { job: Job; index: number }) {
               : job.title || job.url}
           </div>
           <div className="t-meta">
-            {job.error ?? (job.skipped ? "already downloaded — skipped" : job.url)}
+            {job.error ??
+              (job.skipped ?
+                "already downloaded — skipped"
+                : job.itemTitle && (job.state === "downloading" || job.state === "post") ?
+                  `▸ ${job.itemTitle}`
+                  : job.url)}
           </div>
         </td>
         <td>
@@ -457,6 +495,7 @@ export default function QueueTable() {
           <table>
             <colgroup>
               <col style={{ width: 34 }} />
+              <col style={{ width: 56 }} />
               <col />
               <col style={{ width: 150 }} />
               <col style={{ width: 72 }} />
@@ -469,6 +508,7 @@ export default function QueueTable() {
                   #
                   {sortKey === "_order" && <span className="dir">{sortDir === "asc" ? "▼" : "▲"}</span>}
                 </th>
+                <th></th>
                 <th onClick={() => cycleSort("title")}>
                   item
                   {sortKey === "title" && <span className="dir">{sortDir === "asc" ? "▲" : "▼"}</span>}
@@ -491,7 +531,7 @@ export default function QueueTable() {
             <tbody>
               {jobs.length === 0 && (
                 <tr>
-                  <td colSpan={6} className="hint" style={{ padding: "14px 12px" }}>
+                  <td colSpan={7} className="hint" style={{ padding: "14px 12px" }}>
                     {active > 0 ? "" : "nothing queued — paste urls above"}
                   </td>
                 </tr>

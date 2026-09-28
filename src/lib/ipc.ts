@@ -157,6 +157,16 @@ export type JobState =
   | "error"
   | "duplicate";
 
+/** d94: one downloaded/skipped item of a playlist job (shown in the row's
+ * expando). written once at completion; a retried job rebuilds the list. */
+export interface JobItem {
+  idx: number;
+  vid: string;
+  title: string | null;
+  path: string | null;
+  status: "done" | "skipped";
+}
+
 export interface Job {
   id: string;
   url: string;
@@ -164,6 +174,8 @@ export interface Job {
   title: string | null;
   format: string | null;
   finalPath: string | null;
+  /** d93: app-data thumbnail cache path — serve via convertFileSrc */
+  thumb: string | null;
   pct: number | null;
   speedBps: number | null;
   etaSec: number | null;
@@ -172,8 +184,12 @@ export interface Job {
   /** playlist progress (D33): items done / total; null for single videos */
   itemsDone: number | null;
   itemsTotal: number | null;
+  /** d94: per-item records for playlist jobs — empty for single videos */
+  items: JobItem[];
   /** d61: ms elapsed in the fetch phase (live ticker while resolving) */
   fetchMs?: number | null;
+  /** d94: title of the playlist item currently downloading (transient) */
+  itemTitle?: string | null;
   output: string[];
   createdAt: number;
 }
@@ -196,6 +212,8 @@ export const jobRemove = (id: string) => invoke<void>("job_remove", { id });
  * (renderer has no fs access; the dialog plugin opens, not probes). */
 export const fileExists = (path: string) => invoke<boolean>("file_exists", { path });
 export const queueList = () => invoke<Job[]>("queue_list");
+/** d94: per-item records of a playlist job (queue expando). */
+export const jobItemsList = (id: string) => invoke<JobItem[]>("job_items_list", { id });
 
 /** d60: which urls would overwrite existing destination files if queued
  * now (single-video mode only; playlists are excluded by design). the
@@ -233,6 +251,9 @@ export interface HistoryRow {
   sizeBytes: number | null;
   format: string | null;
   finalPath: string | null;
+  /** d93: thumbnail cache path — remote art from the fetch phase, or
+   * locally extracted art (embedded cover / video frame) from the done sweep */
+  thumb: string | null;
   error: string | null;
   downloadedAt: number;
 }
@@ -272,6 +293,16 @@ export const archiveRemove = (entries: [string, string][]) =>
   invoke<number>("archive_remove", { entries });
 
 // ---------------------------------------------------------------------------
+// thumbnails (d93) — diagnostics only; art is written engine-side
+// ---------------------------------------------------------------------------
+
+export interface ThumbsStats {
+  entries: number;
+  bytes: number;
+}
+export const thumbsStats = () => invoke<ThumbsStats>("thumbs_stats");
+
+// ---------------------------------------------------------------------------
 // app paths + version (§7)
 // ---------------------------------------------------------------------------
 
@@ -279,6 +310,8 @@ export interface AppPaths {
   /** the app-owned archive — app-data\downloaded.txt (D75: the only one) */
   archivePath: string;
   binDir: string;
+  /** d93: the row-thumbnail cache dir (app-data\thumbs) */
+  thumbsDir: string;
 }
 
 export const appPaths = () => invoke<AppPaths>("app_paths");

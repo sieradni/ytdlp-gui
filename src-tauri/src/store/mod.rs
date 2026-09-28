@@ -29,6 +29,12 @@ pub struct JobRow {
     /// sidecars to the finished download. null until the identity resolves.
     #[serde(default)]
     pub vid: Option<String>,
+    /// d93: absolute path of the row's thumbnail image in the app-data
+    /// thumbs cache (a local file, served to the webview via convertFileSrc).
+    /// set when the identity resolves (remote art fetched in the background);
+    /// done jobs may have it replaced by locally extracted art.
+    #[serde(default)]
+    pub thumb: Option<String>,
     pub pct: Option<f64>,
     pub speed_bps: Option<f64>,
     pub eta_sec: Option<u64>,
@@ -46,6 +52,20 @@ pub struct JobRow {
     pub updated_at: i64,
 }
 
+/// d94: one downloaded/skipped item of a playlist job. written once at
+/// job completion — this is a record of the run, kept while the job row
+/// lives (remove ✕ clears it with the job).
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JobItem {
+    pub idx: u32,
+    pub vid: String,
+    pub title: Option<String>,
+    pub path: Option<String>,
+    /// "done" | "skipped"
+    pub status: String,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HistoryRow {
@@ -59,6 +79,9 @@ pub struct HistoryRow {
     pub size_bytes: Option<i64>,
     pub format: Option<String>,
     pub final_path: Option<String>,
+    /// d93: thumbs-cache path — remote art from the fetch phase, or locally
+    /// extracted art (embedded cover / video frame) from the done sweep.
+    pub thumb: Option<String>,
     pub error: Option<String>,
     pub downloaded_at: i64,
 }
@@ -73,6 +96,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   format TEXT,
   final_path TEXT,
   vid TEXT,
+  thumb TEXT,
   pct REAL,
   speed_bps REAL,
   eta_sec INTEGER,
@@ -93,9 +117,19 @@ CREATE TABLE IF NOT EXISTS history (
   size_bytes INTEGER,
   format TEXT,
   final_path TEXT,
+  thumb TEXT,
   error TEXT,
   downloaded_at INTEGER NOT NULL,
   PRIMARY KEY (extractor, vid)
+);
+CREATE TABLE IF NOT EXISTS job_items (
+  job_id TEXT NOT NULL,
+  idx INTEGER NOT NULL,
+  vid TEXT NOT NULL,
+  title TEXT,
+  path TEXT,
+  status TEXT NOT NULL DEFAULT 'done',
+  PRIMARY KEY (job_id, vid)
 );
 "#;
 
@@ -133,10 +167,10 @@ impl Db {
 
     pub fn insert_job(&self, j: &JobRow) -> AppResult<()> {
         self.conn().execute(
-            "INSERT INTO jobs (id, options, dest, state, title, format, final_path, vid, pct, speed_bps, eta_sec, error, skipped, items_done, items_total, created_at, updated_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
+            "INSERT INTO jobs (id, options, dest, state, title, format, final_path, vid, thumb, pct, speed_bps, eta_sec, error, skipped, items_done, items_total, created_at, updated_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
             rusqlite::params![
-                j.id, j.options, j.dest, j.state, j.title, j.format, j.final_path, j.vid,
+                j.id, j.options, j.dest, j.state, j.title, j.format, j.final_path, j.vid, j.thumb,
                 j.pct, j.speed_bps, j.eta_sec.map(|v| v as i64), j.error,
                 j.skipped as i64, j.items_done.map(|v| v as i64), j.items_total.map(|v| v as i64),
                 j.created_at, j.updated_at
@@ -147,9 +181,9 @@ impl Db {
 
     pub fn update_job(&self, id: &str, j: &JobRow) -> AppResult<()> {
         self.conn().execute(
-            "UPDATE jobs SET options=?2, dest=?3, state=?4, title=?5, format=?6, final_path=?7, vid=?8, pct=?9, speed_bps=?10, eta_sec=?11, error=?12, skipped=?13, items_done=?14, items_total=?15, updated_at=?16 WHERE id=?1",
+            "UPDATE jobs SET options=?2, dest=?3, state=?4, title=?5, format=?6, final_path=?7, vid=?8, thumb=?9, pct=?10, speed_bps=?11, eta_sec=?12, error=?13, skipped=?14, items_done=?15, items_total=?16, updated_at=?17 WHERE id=?1",
             rusqlite::params![
-                id, j.options, j.dest, j.state, j.title, j.format, j.final_path, j.vid,
+                id, j.options, j.dest, j.state, j.title, j.format, j.final_path, j.vid, j.thumb,
                 j.pct, j.speed_bps, j.eta_sec.map(|v| v as i64), j.error,
                 j.skipped as i64, j.items_done.map(|v| v as i64), j.items_total.map(|v| v as i64),
                 j.updated_at
@@ -162,7 +196,7 @@ impl Db {
     pub fn list_jobs(&self) -> AppResult<Vec<JobRow>> {
         let conn = self.conn();
         let mut stmt = conn.prepare(
-            "SELECT id, options, dest, state, title, format, final_path, vid, pct, speed_bps, eta_sec, error, skipped, items_done, items_total, created_at, updated_at
+            "SELECT id, options, dest, state, title, format, final_path, vid, thumb, pct, speed_bps, eta_sec, error, skipped, items_done, items_total, created_at, updated_at
              FROM jobs ORDER BY created_at ASC, rowid ASC",
         )?;
         let rows = stmt
@@ -197,8 +231,8 @@ impl Db {
 
     pub fn upsert_history(&self, h: &HistoryRow) -> AppResult<()> {
         self.conn().execute(
-            "INSERT INTO history (extractor, vid, url, title, channel, duration_sec, size_bytes, format, final_path, error, downloaded_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
+            "INSERT INTO history (extractor, vid, url, title, channel, duration_sec, size_bytes, format, final_path, thumb, error, downloaded_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)
              ON CONFLICT(extractor, vid) DO UPDATE SET
                url=COALESCE(excluded.url, url),
                title=COALESCE(excluded.title, title),
@@ -207,13 +241,78 @@ impl Db {
                size_bytes=COALESCE(excluded.size_bytes, size_bytes),
                format=COALESCE(excluded.format, format),
                final_path=COALESCE(excluded.final_path, final_path),
+               thumb=COALESCE(excluded.thumb, thumb),
                error=COALESCE(excluded.error, error),
                downloaded_at=excluded.downloaded_at",
             rusqlite::params![
                 h.extractor, h.vid, h.url, h.title, h.channel, h.duration_sec, h.size_bytes,
-                h.format, h.final_path, h.error, h.downloaded_at
+                h.format, h.final_path, h.thumb, h.error, h.downloaded_at
             ],
         )?;
+        Ok(())
+    }
+
+    /// d93: record a thumbnail cache path for one row (queue jobs by id,
+    /// history rows by identity); None clears. a no-op when the row is
+    /// gone — the fetch runs in the background and may finish after a remove.
+    pub fn set_job_thumb(&self, id: &str, thumb: Option<&str>) -> AppResult<()> {
+        self.conn().execute(
+            "UPDATE jobs SET thumb=?2, updated_at=updated_at WHERE id=?1",
+            rusqlite::params![id, thumb],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_history_thumb(&self, extractor: &str, vid: &str, thumb: Option<&str>) -> AppResult<()> {
+        self.conn().execute(
+            "UPDATE history SET thumb=?3 WHERE extractor=?1 AND vid=?2",
+            rusqlite::params![extractor, vid, thumb],
+        )?;
+        Ok(())
+    }
+
+    // ----- job_items (d94): per-item visibility for playlist jobs -----
+
+    /// replace one job's item list (written once at done; a retry deletes
+    /// the previous attempt's rows so a stale list can't outlive its run).
+    pub fn replace_job_items(&self, job_id: &str, items: &[JobItem]) -> AppResult<()> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        tx.execute("DELETE FROM job_items WHERE job_id=?1", [job_id])?;
+        for it in items {
+            tx.execute(
+                "INSERT OR REPLACE INTO job_items (job_id, idx, vid, title, path, status)
+                 VALUES (?1,?2,?3,?4,?5,?6)",
+                rusqlite::params![job_id, it.idx, it.vid, it.title, it.path, it.status],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn list_job_items(&self, job_id: &str) -> AppResult<Vec<JobItem>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT idx, vid, title, path, status FROM job_items
+             WHERE job_id=?1 ORDER BY idx ASC, rowid ASC",
+        )?;
+        let rows = stmt
+            .query_map([job_id], |r| {
+                Ok(JobItem {
+                    idx: r.get::<_, i64>(0)?.max(0) as u32,
+                    vid: r.get(1)?,
+                    title: r.get(2)?,
+                    path: r.get(3)?,
+                    status: r.get(4)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    pub fn delete_job_items(&self, job_id: &str) -> AppResult<()> {
+        self.conn()
+            .execute("DELETE FROM job_items WHERE job_id=?1", [job_id])?;
         Ok(())
     }
 
@@ -226,7 +325,7 @@ impl Db {
             .map(|f| format!("%{}%", f.replace(['%', '_'], "")))
             .unwrap_or_else(|| "%".to_owned());
         let mut stmt = conn.prepare(
-            "SELECT extractor, vid, url, title, channel, duration_sec, size_bytes, format, final_path, error, downloaded_at
+            "SELECT extractor, vid, url, title, channel, duration_sec, size_bytes, format, final_path, thumb, error, downloaded_at
              FROM history
              WHERE IFNULL(title,'') LIKE ?1 OR IFNULL(channel,'') LIKE ?1
                 OR extractor || ' ' || vid LIKE ?1 OR IFNULL(final_path,'') LIKE ?1
@@ -313,15 +412,16 @@ fn row_to_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<JobRow> {
         format: row.get(5)?,
         final_path: row.get(6)?,
         vid: row.get(7)?,
-        pct: row.get(8)?,
-        speed_bps: row.get(9)?,
-        eta_sec: row.get::<_, Option<i64>>(10)?.map(|v| v.max(0) as u64),
-        error: row.get(11)?,
-        skipped: row.get::<_, i64>(12)? != 0,
-        items_done: row.get::<_, Option<i64>>(13)?.map(|v| v.max(0) as u32),
-        items_total: row.get::<_, Option<i64>>(14)?.map(|v| v.max(0) as u32),
-        created_at: row.get(15)?,
-        updated_at: row.get(16)?,
+        thumb: row.get(8)?,
+        pct: row.get(9)?,
+        speed_bps: row.get(10)?,
+        eta_sec: row.get::<_, Option<i64>>(11)?.map(|v| v.max(0) as u64),
+        error: row.get(12)?,
+        skipped: row.get::<_, i64>(13)? != 0,
+        items_done: row.get::<_, Option<i64>>(14)?.map(|v| v.max(0) as u32),
+        items_total: row.get::<_, Option<i64>>(15)?.map(|v| v.max(0) as u32),
+        created_at: row.get(16)?,
+        updated_at: row.get(17)?,
     })
 }
 
@@ -336,8 +436,9 @@ fn row_to_history(row: &rusqlite::Row<'_>) -> rusqlite::Result<HistoryRow> {
         size_bytes: row.get(6)?,
         format: row.get(7)?,
         final_path: row.get(8)?,
-        error: row.get(9)?,
-        downloaded_at: row.get(10)?,
+        thumb: row.get(9)?,
+        error: row.get(10)?,
+        downloaded_at: row.get(11)?,
     })
 }
 
@@ -356,17 +457,18 @@ pub fn db_path() -> std::path::PathBuf {
 /// databases created by older builds. CREATE TABLE IF NOT EXISTS above
 /// covers fresh installs; this covers the in-place upgrade path.
 fn ensure_columns(conn: &Connection) {
-    let existing: std::collections::HashSet<String> = {
+    let columns = |table: &str| -> std::collections::HashSet<String> {
+        let sql = format!("SELECT name FROM pragma_table_info('{table}')");
         let mut stmt = conn
-            .prepare("SELECT name FROM pragma_table_info('jobs')")
-            .expect("pragma jobs");
-        let names = stmt
-            .query_map([], |r| r.get::<_, String>(0))
+            .prepare(&sql)
+            .unwrap_or_else(|e| panic!("pragma {table}: {e}"));
+        stmt.query_map([], |r| r.get::<_, String>(0))
             .expect("pragma query")
             .filter_map(Result::ok)
-            .collect();
-        names
+            .collect()
     };
+
+    let existing = columns("jobs");
     for (col, ddl) in [
         (
             "items_done",
@@ -377,11 +479,20 @@ fn ensure_columns(conn: &Connection) {
             "ALTER TABLE jobs ADD COLUMN items_total INTEGER",
         ),
         ("vid", "ALTER TABLE jobs ADD COLUMN vid TEXT"),
+        ("thumb", "ALTER TABLE jobs ADD COLUMN thumb TEXT"),
     ] {
         if !existing.contains(col) {
             if let Err(e) = conn.execute_batch(ddl) {
                 eprintln!("history.db: adding column {col} failed: {e}");
             }
+        }
+    }
+
+    // d93: the history table gains its first post-schema column — rows
+    // without one are covered by the same ensure_columns upgrade path.
+    if !columns("history").contains("thumb") {
+        if let Err(e) = conn.execute_batch("ALTER TABLE history ADD COLUMN thumb TEXT") {
+            eprintln!("history.db: adding history.thumb failed: {e}");
         }
     }
 }
@@ -582,6 +693,7 @@ mod tests {
             format: None,
             final_path: None,
             vid: None,
+            thumb: None,
             pct: None,
             speed_bps: None,
             eta_sec: None,
@@ -655,6 +767,7 @@ mod tests {
             size_bytes: Some(1024),
             format: Some("2160p webm".into()),
             final_path: Some(r"C:\dl\sunset.webm".into()),
+            thumb: None,
             error: None,
             downloaded_at: 100,
         })
@@ -670,6 +783,7 @@ mod tests {
             size_bytes: None,
             format: None,
             final_path: None,
+            thumb: None,
             error: None,
             downloaded_at: 200,
         })

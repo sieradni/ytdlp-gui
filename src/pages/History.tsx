@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { choiceDialog, confirmDialog } from "../components/ConfirmDialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
@@ -19,6 +20,7 @@ import {
 } from "../lib/ipc";
 import { currentOptions } from "../lib/composeMirror";
 import { useUi } from "../stores/ui";
+import { Thumb } from "../components/Thumb";
 
 function fmtSize(bytes: number | null): string {
   if (bytes == null) return "—";
@@ -44,12 +46,52 @@ function fmtDate(unix: number): string {
 
 const rowKey = (row: HistoryRow) => `${row.extractor} ${row.vid}`;
 
+// d95: history column sorting (was never implemented — headers rendered but
+// did nothing). asc → desc → off cycle; missing values sort last in both
+// directions (the queue table's §6 convention).
+type SortKey = "title" | "channel" | "size" | "dur" | "downloaded";
+
 export default function HistoryPage() {
   const [rows, setRows] = useState<HistoryRow[]>([]);
   const [query, setQuery] = useState("");
   const [importMsg, setImportMsg] = useState<string | null>(null);
   /** rows whose file vanished (reveal failed) — offer locate… (§6) */
   const [moved, setMoved] = useState<Set<string>>(new Set());
+  const [sortKey, setSortKey] = useState<SortKey | null>(null);
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
+
+  const cycleSort = (k: SortKey) => {
+    if (sortKey !== k) {
+      setSortKey(k);
+      setSortDir(k === "downloaded" ? "desc" : "asc");
+    } else if (sortDir === "asc") {
+      setSortDir("desc");
+    } else {
+      setSortKey(null); // off — back to newest-first
+    }
+  };
+
+  const sortedRows = useMemo(() => {
+    if (!sortKey) return rows;
+    const mul = sortDir === "asc" ? 1 : -1;
+    const getters: Record<SortKey, (r: HistoryRow) => string | number | null> = {
+      title: (r) => (r.title ?? "").toLowerCase(),
+      channel: (r) => (r.channel ?? "").toLowerCase(),
+      size: (r) => r.sizeBytes,
+      dur: (r) => r.durationSec,
+      downloaded: (r) => r.downloadedAt,
+    };
+    const get = getters[sortKey];
+    return [...rows].sort((a, b) => {
+      const av = get(a);
+      const bv = get(b);
+      if (av == null && bv == null) return 0;
+      if (av == null) return 1;
+      if (bv == null) return -1;
+      if (typeof av === "string" && typeof bv === "string") return av.localeCompare(bv) * mul;
+      return ((av as number) - (bv as number)) * mul;
+    });
+  }, [rows, sortKey, sortDir]);
 
   const load = useCallback(async (filter?: string) => {
     setRows(await historyList(filter));
@@ -71,6 +113,24 @@ export default function HistoryPage() {
     void load();
   }, [load]);
 
+  // d93: backfill art for rows lacking it. bounded to the newest 24 per
+  // visit so a 2k-entry history never turns into a network crawl; fresh
+  // cache entries resolve instantly (no fetch), later visits pull the next
+  // rows naturally, and a reload after any success paints what landed.
+  useEffect(() => {
+    if (rows.length === 0) return;
+    const missing = rows.filter((r) => !r.thumb).slice(0, 24);
+    if (missing.length === 0) return;
+    void invoke<[string, string, string][]>("thumbs_prefetch_history", {
+      items: missing.map((r) => [r.extractor, r.vid, r.url ?? ""]),
+      max: 24,
+    })
+      .then((done) => {
+        if (done.length > 0) void load(query || undefined);
+      })
+      .catch(() => {}); // thumbnails never block the page
+  }, [rows]);
+
   // keep-alive (App.tsx): the page stays mounted across tab switches, so this
   // effect is what keeps it FRESH — every time history becomes the visible
   // page, re-pull with the current search. scroll position and the query box
@@ -79,6 +139,34 @@ export default function HistoryPage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (page === "history") void load(query || undefined);
+  }, [page]);
+
+  // keep-alive, d95: "moved?" used to reset on unmount — revisit re-read disk
+  // truth. pages now stay mounted, so the flag would stick forever even after
+  // the file is restored or relinked while the tab was hidden. re-validate
+  // flagged rows (server-side probe) every time history becomes visible.
+  useEffect(() => {
+    if (page !== "history" || moved.size === 0) return;
+    void (async () => {
+      const restored: string[] = [];
+      for (const key of moved) {
+        const row = rows.find((r) => rowKey(r) === key);
+        if (!row?.finalPath) continue;
+        try {
+          if (await fileExists(row.finalPath)) restored.push(key);
+        } catch { /* probe failure keeps the flag — failures degrade quietly */ }
+      }
+      if (restored.length > 0) {
+        setMoved((prev) => {
+          const next = new Set(prev);
+          for (const k of restored) next.delete(k);
+          return next;
+        });
+      }
+    })();
+    // deliberately keyed on page only: this is the revisit refresh, not a
+    // reaction to flag/row changes (those manage their own flags precisely).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [page]);
 
   // F5 refreshes history (§6 keyboard/ux polish). the page is keep-alive
@@ -97,8 +185,32 @@ export default function HistoryPage() {
 
   const showInFolder = async (row: HistoryRow) => {
     if (!row.finalPath) return;
+    // d95: revealItemInDir on a vanished file opens the file's parent
+    // folder WITHOUT error — the old try/catch never fired, so the button
+    // looked like a noop and nothing told the user the file was gone.
+    // probe server-side first: a missing file flips the row to "moved?"
+    // with the 🔍 locate… affordance and says so in the status line.
+    let exists = false;
+    try {
+      exists = await fileExists(row.finalPath);
+    } catch {
+      exists = false;
+    }
+    if (!exists) {
+      setMoved((prev) => new Set(prev).add(rowKey(row)));
+      setImportMsg(
+        `“${row.title ?? row.vid}” is not at its last known path — press 🔍 to locate the moved file`,
+      );
+      return;
+    }
     try {
       await revealItemInDir(row.finalPath);
+      // a successful reveal is proof the file is back — drop a stale flag
+      setMoved((prev) => {
+        const next = new Set(prev);
+        next.delete(rowKey(row));
+        return next;
+      });
     } catch {
       // the app never follows files silently — flip to "moved?" + locate…
       setMoved((prev) => new Set(prev).add(rowKey(row)));
@@ -228,11 +340,26 @@ export default function HistoryPage() {
             </colgroup>
             <thead>
               <tr>
-                <th>title</th>
-                <th>channel</th>
-                <th>size</th>
-                <th>dur</th>
-                <th>downloaded</th>
+                <th onClick={() => cycleSort("title")}>
+                  title
+                  {sortKey === "title" && <span className="dir">{sortDir === "asc" ? "▲" : "▼"}</span>}
+                </th>
+                <th onClick={() => cycleSort("channel")}>
+                  channel
+                  {sortKey === "channel" && <span className="dir">{sortDir === "asc" ? "▲" : "▼"}</span>}
+                </th>
+                <th onClick={() => cycleSort("size")}>
+                  size
+                  {sortKey === "size" && <span className="dir">{sortDir === "asc" ? "▲" : "▼"}</span>}
+                </th>
+                <th onClick={() => cycleSort("dur")}>
+                  dur
+                  {sortKey === "dur" && <span className="dir">{sortDir === "asc" ? "▲" : "▼"}</span>}
+                </th>
+                <th onClick={() => cycleSort("downloaded")}>
+                  downloaded
+                  {sortKey === "downloaded" && <span className="dir">{sortDir === "asc" ? "▲" : "▼"}</span>}
+                </th>
                 <th></th>
               </tr>
             </thead>
@@ -244,16 +371,21 @@ export default function HistoryPage() {
                   </td>
                 </tr>
               )}
-              {rows.map((row) => {
+              {sortedRows.map((row) => {
                 const isMoved = moved.has(rowKey(row));
                 return (
                   <tr key={rowKey(row)}>
                     <td>
-                      <div className="t-title">{row.title ?? rowKey(row)}</div>
-                      <div className="t-meta">
-                        {row.extractor}
-                        {isMoved && ' · '}
-                        {isMoved && <span className="warn">moved?</span>}
+                      <div className="thumb-title-wrap">
+                        <Thumb src={row.thumb} title={row.title} />
+                        <div style={{ minWidth: 0 }}>
+                          <div className="t-title">{row.title ?? rowKey(row)}</div>
+                          <div className="t-meta">
+                            {row.extractor}
+                            {isMoved && ' · '}
+                            {isMoved && <span className="warn">moved?</span>}
+                          </div>
+                        </div>
                       </div>
                     </td>
                     <td className="t-meta">{row.channel ?? "—"}</td>
@@ -313,7 +445,10 @@ export default function HistoryPage() {
           className="card-b flex items-center flex-wrap gap-2"
           style={{ borderTop: "1px solid var(--border)" }}
         >
-          <span className="hint">{rows.length} entries</span>
+          <span className="hint">
+            {rows.length} entries
+            {sortKey && (sortDir === "asc" ? " · sorted ▲" : " · sorted ▼")}
+          </span>
           <span className="grow" />
           {importMsg && <span className="hint hist-msg">{importMsg}</span>}
           <button className="btn sm ghost" onClick={() => void importArchive()}>

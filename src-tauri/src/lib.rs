@@ -101,6 +101,23 @@ pub fn run() {
             // queue + dispatcher live for the whole app lifetime
             let queue = engine::queue::JobQueue::new(app.handle().clone(), Arc::clone(&db));
             app.manage(commands::jobs::QueueHandle::new(queue));
+
+            // d93: grant the asset-protocol scope for the REAL thumbnail
+            // cache dir at runtime. the static $APPDATA pattern in
+            // tauri.conf.json resolves to dirs::data_dir()/<bundle-id>
+            // (Roaming\com.ytdlp-gui.app), but this app deliberately uses
+            // its own data dir (ytdlp-gui / ytdlp-gui-dev / the
+            // YTDLP_GUI_DATA_DIR override) — a static scope can never match
+            // all three, so allow_directory() on the actual dir is the only
+            // correct form. (verified against tauri 2.11's path resolver.)
+            // (tauri's protocol-asset feature is enabled unconditionally on
+            // our tauri dependency, so no cfg gate.)
+            {
+                use tauri::Manager;
+                let _ = app
+                    .asset_protocol_scope()
+                    .allow_directory(engine::thumbs::cache_dir(), true);
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -135,6 +152,9 @@ pub fn run() {
             commands::app::app_reset_data,
             commands::app::e2e_artifacts_report,
             commands::app::e2e_artifacts_remove,
+            commands::thumbs::thumbs_prefetch_history,
+            commands::thumbs::thumbs_stats,
+            commands::history::job_items_list,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

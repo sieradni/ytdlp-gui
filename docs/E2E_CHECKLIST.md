@@ -15,6 +15,33 @@ automated runner: `node scripts/e2e/run.cjs` drives these scenarios in the
 real app over cdp (see `--list`). `--smoke` runs the youtube-independent
 subset (S9/S10/S12/S14/S18/S19) — use it when youtube is bot-gating the
 machine; a full run still requires youtube scenarios to be runnable.
+`--only` selects whole GROUPS (running one group = fresh sandbox + fresh app,
+all its scenarios in chain order — a lone scenario cannot run solo).
+
+## harness conventions (2026-09-28, d95 close-out)
+
+keep-alive pages are the runner's standing trap. App.tsx keeps home, history
+and settings MOUNTED (hidden), so page-level selectors see all three pages'
+dom at once — the round that bit: s18's history ↻-click matched the home
+queue row for the same url first (identical title text, no ↻ button) and
+starved as "pending" forever. rules:
+
+- history-table predicates must scope to `table.hist-table` (the only table
+  with a stable class — QueueTable renders a bare `<table>`).
+- prefer matching a row by its action BUTTON title ("download again",
+  "show in folder", "locate", "stop", "retry", "output") over row text:
+  only history rows carry the history actions, and d93's meta line shows
+  "▸ <item title>" for a running job — the url is not guaranteed to be in
+  a downloading row's text at all.
+- the hover-card trigger cell is `td:nth-child(3)` (the d93 thumb column
+  inserted at position 2; the onMouseEnter lives on the text cell).
+- never `job_remove` a RUNNING job — the engine refuses it (D33); the
+  refusal is a silent noop and every re-queue then hits the identity gate
+  as "duplicate". `job_stop` first, wait for terminal, then remove.
+- speed races are the norm: a 1080p youtube job completes in seconds on a
+  fast pipe, inside any multi-second file-size gate. gates must verify the
+  CURRENT attempt's job, and terminal-before-the-click must re-queue (s6)
+  or re-read (s5), not fail.
 
 ## prerequisites
 
@@ -35,7 +62,7 @@ machine; a full run still requires youtube scenarios to be runnable.
 | 4 | duplicate of archived item | re-queue scenario 1's url with skip-downloaded on | job ends done/skipped almost instantly — log says "already downloaded — skipping (archive)", no re-download, no duplicate history row |
 | 5 | duplicate while queued | paste the same url into a second queued job before the first resolves | second job ends duplicate with the "already queued/running" note (D18/D33) |
 | 6 | stopped → retry resume | stop a large download mid-flight, then retry | stop lands in stopped (not error), `.part` kept; retry resumes from partials (bytes continue, not restart) |
-| 7 | moved file locate… | move a downloaded file, then click 📁 in history | reveal fails gracefully → row offers locate… → picking the new path relinks history and reveal works |
+| 7 | moved file locate… | move a downloaded file, then click 📁 in history | reveal fails gracefully → row offers locate… → picking the new path relinks history and reveal works. the "moved?" flag is re-validated against disk every time history becomes visible, and a successful reveal clears it (keep-alive, d95) — restoring the file externally is never a stale noop |
 | 8 | re-download uses composer (D19) | set composer to audio/opus, then history ↻ on any video row | the queued job's argv preview/actual argv contains opus mapping — never the old video options (works from the history tab too, D52) |
 | 9 | intranet / garbage url | queue `http://192.168.1.1/x` and `not a url` | garbage is rejected at intake with a per-line reason; intranet is accepted and errors at fetch with the engine's message — intake is lenient (D28) |
 | 10 | soundcloud / bandcamp audio | queue one audio url from either site, audio mode | `-f ba/b` falls back cleanly on single-format sources; audio lands with correct extension |
@@ -54,6 +81,9 @@ machine; a full run still requires youtube scenarios to be runnable.
 | 23 | archive import merge/replace (D75) | history → "import archive…" on a foreign txt (ids A,B), re-import after the app archive gains a separate id C, then again choosing replace | merge unions (archive holds A,B then A,B,C; the picked file is never modified); replace swaps the archive to exactly the imported content while history keeps C's row (never deleted); the default mode is merge; re-import reports 0 new; settings.archivePath stays empty |
 
 ## notes
+
+- the "moved?" locate… step (7) still goes through `history_relink` ipc
+  directly: the native file-picker dialog is not scriptable over cdp.
 
 - scenario 17 is only runnable once the D56 flip is done (key + secrets +
   createUpdaterArtifacts). before that, the settings row's check-now just

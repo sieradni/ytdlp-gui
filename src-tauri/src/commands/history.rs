@@ -89,6 +89,16 @@ pub fn history_list(
     db.list_history(filter.as_deref())
 }
 
+/// d94: per-item records of a playlist job (the queue expando lists the
+/// actual tracks). returns an empty list for single-video jobs.
+#[tauri::command]
+pub fn job_items_list(
+    handle: tauri::State<'_, crate::commands::jobs::QueueHandle>,
+    id: String,
+) -> AppResult<Vec<crate::store::JobItem>> {
+    handle.0.list_items(&id)
+}
+
 /// d75: export the app-owned archive to a user-chosen path — the sanctioned
 /// way to hand the archive to other tools or keep a backup. the app copy
 /// is never removed or moved; exporting is a pure copy.

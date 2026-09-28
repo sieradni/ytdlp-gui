@@ -16,14 +16,15 @@ use std::path::Path;
 use serde::Deserialize;
 
 /// windows-only: CREATE_NO_WINDOW so the probe never flashes a console
-/// (same pattern as process.rs).
+/// (same pattern as process.rs). pub(crate): d93's thumbnail extraction
+/// runs the same managed binaries under the same no-console discipline.
 #[cfg(windows)]
-fn no_window(cmd: &mut tokio::process::Command) {
+pub(crate) fn no_window(cmd: &mut tokio::process::Command) {
     cmd.creation_flags(0x0800_0000);
 }
 
 #[cfg(not(windows))]
-fn no_window(_cmd: &mut tokio::process::Command) {}
+pub(crate) fn no_window(_cmd: &mut tokio::process::Command) {}
 
 #[derive(Debug, Clone, Default)]
 pub struct FileMeta {

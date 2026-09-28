@@ -361,6 +361,98 @@ tr:last-child td {
 tbody tr:hover {
   background: rgba(255, 255, 255, 0.025);
 }
+
+/* ===== row thumbnails (d93) ===== */
+.thumbcell {
+  padding-left: 4px !important;
+  padding-right: 2px !important;
+}
+.thumb {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 30px;
+  border-radius: 4px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border);
+  flex: none;
+  position: relative;
+}
+.thumb-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  transition: opacity 0.25s ease;
+}
+.thumb-fallback {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--faint);
+  user-select: none;
+}
+.thumb-title-wrap {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+/* ===== playlist item list (d94, queue expando) ===== */
+.itemlist {
+  margin: 4px 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.itemlist-h {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--muted);
+  padding: 5px 10px;
+  background: rgba(255, 255, 255, 0.03);
+  border-bottom: 1px solid var(--border);
+}
+.itemlist-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  font-size: 12px;
+}
+.itemlist-row:last-child {
+  border-bottom: none;
+}
+.itemlist-row.skipped {
+  opacity: 0.55;
+}
+.itemlist-idx {
+  color: var(--faint);
+  font-size: 11px;
+  min-width: 20px;
+  text-align: right;
+}
+.itemlist-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.itemlist-badge {
+  font-size: 10px;
+  color: var(--amber);
+  border: 1px solid var(--amber-border);
+  border-radius: 3px;
+  padding: 0 4px;
+  flex: none;
+}
 .t-title {
   font-weight: 700;
   overflow: hidden;

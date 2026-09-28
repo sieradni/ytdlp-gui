@@ -34,8 +34,12 @@ pub enum ParsedLine {
     FinalPath(String),
     /// per-item title extracted from output (D45: runtime metadata).
     Title(String),
-    /// a playlist item started: `[download] <id>: ...` destination lines.
-    ItemStart { id: String },
+    /// a playlist item started: `[download] <id>: <title>` (d94: the title
+    /// is carried too — job_items records name the tracks, not just ids).
+    ItemStart {
+        id: String,
+        title: Option<String>,
+    },
     /// `__I__<index>|<effective-total>|<full-playlist-size>` from the
     /// engine's pre_process print (e2e find, 2026-09-03: the console
     /// "Downloading item N of M" line is suppressed under a download:
@@ -49,9 +53,24 @@ pub enum ParsedLine {
     /// there). count = %(playlist_count)s, the FULL playlist size; the
     /// per-item __I__ print refines it to the clamped total.
     PlaylistTotal { total: u32 },
+    /// `__C__<index>|<channel>|<uploader>|<playlist_title>` from the engine's
+    /// per-item print (d94): the uploader — feeds the history row's channel
+    /// column (never populated before; the column was dead). live-verified
+    /// 2026-09: youtube fills %(channel)s, bandcamp only %(uploader)s — both
+    /// are carried, either may be NA; single videos also emit (NA index).
+    Channel {
+        channel: Option<String>,
+        uploader: Option<String>,
+    },
+    /// `__N__<title>` from the engine's per-item print (d94): the item's own
+    /// title at item start. fires in normal runs (unlike the verbose-gated
+    /// `[download] <id>: <title>` line).
+    ItemTitle(String),
     /// `[download] <id>: <title> has already been recorded in the archive`.
-    /// a skipped playlist item — counts as processed (D54).
-    PlaylistSkip { id: String },
+    /// a skipped playlist item — counts as processed (D54). d94: the title
+    /// rides along (the skip line is the ONLY per-item signal archive-
+    /// skipped items produce — pre_process prints don't fire for them).
+    PlaylistSkip { id: String, title: Option<String> },
     /// destination line: `Destination: …` / `[Merger] …` (post-processing).
     Destination(String),
     /// fragment/stream stage line that still counts as downloading.
@@ -78,13 +97,12 @@ pub fn parse_line(raw: &str) -> ParsedLine {
         return parse_template_fields(vals);
     }
 
-    // ---- --print after_move:filepath output (bare path line) ----
-    if looks_like_path(t) {
-        return ParsedLine::FinalPath(t.to_owned());
-    }
-
     // ---- engine's playlist-level print: __T__<count> (fires even when
     //      every item is archive-skipped; see args.rs) ----
+    // d94/ADVERSARIAL-REVIEW: ALL engine __X__ prints are checked BEFORE
+    // looks_like_path — a channel/uploader containing '/' or '\\' (AC/DC)
+    // inside a __C__ payload would otherwise be eaten as a phantom
+    // FinalPath (inflating item counts, poisoning final_path).
     if let Some(rest) = t.strip_prefix("__T__") {
         if let Ok(total) = rest.trim().parse::<u32>() {
             return ParsedLine::PlaylistTotal { total };
@@ -102,6 +120,40 @@ pub fn parse_line(raw: &str) -> ParsedLine {
                 total,
             };
         }
+    }
+
+    // ---- engine's per-item channel print: __C__<idx>|<channel>|<uploader>|<pl_title>
+    //      (d94; uploader added after live probing — bandcamp's %(channel)s
+    //      is NA while %(uploader)s carries the artist). either may be NA.
+    if let Some(rest) = t.strip_prefix("__C__") {
+        let mut it = rest.split('|');
+        let _index = it.next();
+        let non_na = |s: Option<&str>| {
+            s.map(str::trim)
+                .filter(|s| !s.is_empty() && *s != "NA")
+                .map(str::to_owned)
+        };
+        let channel = non_na(it.next());
+        let uploader = non_na(it.next());
+        if channel.is_some() || uploader.is_some() {
+            return ParsedLine::Channel { channel, uploader };
+        }
+    }
+
+    // ---- engine's per-item title print: __N__<title> (d94). pre_process
+    //      fires once per item in NORMAL runs (live-verified: the verbose
+    //      `[download] <id>: <title>` line does NOT) — this is the only
+    //      reliable per-item title signal for the track list.
+    if let Some(rest) = t.strip_prefix("__N__") {
+        let title = rest.trim();
+        if !title.is_empty() && title != "NA" {
+            return ParsedLine::ItemTitle(title.to_owned());
+        }
+    }
+
+    // ---- --print after_move:filepath output (bare path line) ----
+    if looks_like_path(t) {
+        return ParsedLine::FinalPath(t.to_owned());
     }
 
     // ---- playlist counter via the engine's per-item print (see args.rs:
@@ -151,14 +203,28 @@ pub fn parse_line(raw: &str) -> ParsedLine {
                     && id
                         .chars()
                         .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
-                if id_like && rest.contains("already been recorded in the archive") {
-                    return ParsedLine::PlaylistSkip { id: id.to_owned() };
-                }
+            if id_like && rest.contains("already been recorded in the archive") {
+                // title = everything before the "has already…" suffix
+                let title = rest
+                    .split(" has already been recorded")
+                    .next()
+                    .map(str::trim)
+                    .filter(|t| !t.is_empty())
+                    .map(str::to_owned);
+                return ParsedLine::PlaylistSkip {
+                    id: id.to_owned(),
+                    title,
+                };
+            }
                 // `[download] abc123: Some Title` — runtime title (D45).
                 // the charset guard keeps container lines like "Finished
                 // downloading playlist" from posing as item starts.
+                // d94: the title rides along for job_items records.
                 if id_like {
-                    return ParsedLine::ItemStart { id: id.to_owned() };
+                    return ParsedLine::ItemStart {
+                        id: id.to_owned(),
+                        title: Some(rest.trim().to_owned()).filter(|t| !t.is_empty()),
+                    };
                 }
             }
             return ParsedLine::Line(line.to_owned());
@@ -391,6 +457,46 @@ mod tests {
     }
 
     #[test]
+    fn engine_prints_never_eaten_as_paths() {
+        // ADVERSARIAL-REGRESSION (2026-09): looks_like_path used to run BEFORE
+        // the engine-print checks, so a channel containing '/' or '\\' inside
+        // a __C__ payload became a phantom FinalPath (inflating items_done,
+        // poisoning final_path). engine prints MUST win over the heuristic.
+        match parse_line("__C__3|AC/DC|NA|Backtracks") {
+            ParsedLine::Channel { channel, uploader } => {
+                assert_eq!(channel.as_deref(), Some("AC/DC"));
+                assert_eq!(uploader, None);
+            }
+            other => panic!("channel print eaten as path: {other:?}"),
+        }
+        match parse_line("__C__1|jawed|jawed|NA") {
+            ParsedLine::Channel { channel, uploader } => {
+                assert_eq!(channel.as_deref(), Some("jawed"));
+                assert_eq!(uploader.as_deref(), Some("jawed"));
+            }
+            other => panic!("wrong parse: {other:?}"),
+        }
+        // both NA (some sites expose neither) → falls through to Line
+        assert!(matches!(parse_line("__C__1|NA|NA|Dive"), ParsedLine::Line(_)));
+        // __N__ with a slashy title is a title, never a path
+        match parse_line("__N__AC/DC - Back In Black") {
+            ParsedLine::ItemTitle(t) => assert_eq!(t, "AC/DC - Back In Black"),
+            other => panic!("title print eaten: {other:?}"),
+        }
+        // verbatim live shapes (2026-09, tycho bandcamp album / youtube)
+        assert!(matches!(
+            parse_line("__C__2|NA|Tycho|Dive"),
+            ParsedLine::Channel { .. }
+        ));
+        match parse_line("__N__Tycho - Hours") {
+            ParsedLine::ItemTitle(t) => assert_eq!(t, "Tycho - Hours"),
+            other => panic!("wrong parse: {other:?}"),
+        }
+        // NA title is not a title
+        assert!(matches!(parse_line("__N__NA"), ParsedLine::Line(_)));
+    }
+
+    #[test]
     fn final_path_detection() {
         match parse_line(r"C:\Users\you\Downloads\Sunset [ab12].webm") {
             ParsedLine::FinalPath(p) => assert!(p.ends_with(".webm")),
@@ -409,7 +515,10 @@ mod tests {
     #[test]
     fn item_start_vs_progress() {
         match parse_line("[download] abc123def45: Sunset Timelapse 4K") {
-            ParsedLine::ItemStart { id } => assert_eq!(id, "abc123def45"),
+            ParsedLine::ItemStart { id, title } => {
+                assert_eq!(id, "abc123def45");
+                assert_eq!(title.as_deref(), Some("Sunset Timelapse 4K"));
+            }
             other => panic!("wrong parse: {other:?}"),
         }
     }
@@ -447,17 +556,26 @@ mod tests {
         match parse_line(
             "[download] 0Rp9KJCEIvg: The most interesting hack in history just got weirder... has already been recorded in the archive",
         ) {
-            ParsedLine::PlaylistSkip { id } => assert_eq!(id, "0Rp9KJCEIvg"),
+            ParsedLine::PlaylistSkip { id, title } => {
+                assert_eq!(id, "0Rp9KJCEIvg");
+                assert_eq!(
+                    title.as_deref(),
+                    Some("The most interesting hack in history just got weirder...")
+                );
+            }
             other => panic!("wrong parse: {other:?}"),
         }
         // ids with hyphen/underscore still recognized
         match parse_line("[download] abc-_123: X has already been recorded in the archive") {
-            ParsedLine::PlaylistSkip { id } => assert_eq!(id, "abc-_123"),
+            ParsedLine::PlaylistSkip { id, title } => {
+                assert_eq!(id, "abc-_123");
+                assert_eq!(title.as_deref(), Some("X"));
+            }
             other => panic!("wrong parse: {other:?}"),
         }
         // a genuine item-start title line is NOT a skip
         match parse_line("[download] abc123: Sunset Timelapse 4K") {
-            ParsedLine::ItemStart { id } => assert_eq!(id, "abc123"),
+            ParsedLine::ItemStart { id, .. } => assert_eq!(id, "abc123"),
             other => panic!("wrong parse: {other:?}"),
         }
     }

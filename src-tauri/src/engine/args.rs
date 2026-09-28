@@ -171,6 +171,16 @@ const ENGINE_FLAGS: &[&str] = &[
     // single videos print NA — the engine ignores those.
     "--print",
     "pre_process:__I__%(playlist_index)s|%(n_entries)s|%(playlist_count)s",
+    // d94: per-item channel/uploader + title. fires once per item (the same
+    // branch as the __I__ print). live-verified 2026-09: youtube fills
+    // %(channel)s but not %(uploader)s, bandcamp the reverse — both are
+    // carried and either may be NA. the __N__ title print is the ONLY
+    // reliable per-item title in normal (non-verbose) runs; it feeds the
+    // queue's track list and the "now downloading" line.
+    "--print",
+    "pre_process:__C__%(playlist_index)s|%(channel)s|%(uploader)s|%(playlist_title)s",
+    "--print",
+    "pre_process:__N__%(title)s",
     // playlist-level total print: fires ONCE per playlist run even when
     // every item is archive-skipped (e2e find: pre_process doesn't fire for
     // skips, so a fully-archived playlist would otherwise end with no
@@ -458,6 +468,11 @@ mod tests {
         assert!(s.contains("%(progress.total_bytes)s"));
         assert!(s.contains("%(progress.total_bytes_estimate)s"));
         assert!(s.contains("after_move:filepath"));
+        // d94: channel/title prints are engine-owned
+        assert!(s.contains(
+            "pre_process:__C__%(playlist_index)s|%(channel)s|%(uploader)s|%(playlist_title)s"
+        ));
+        assert!(s.contains("pre_process:__N__%(title)s"));
         assert!(s.contains("--no-playlist"));
         assert!(s.contains(r"-P C:\dl"));
         assert!(s.contains("-f ba/b"));
