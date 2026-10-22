@@ -443,20 +443,6 @@ span.itemlist-check {
   font-weight: 400;
   margin-left: auto;
 }
-.itemlist-del {
-  /* discoverable without shouting: quiet until the row is pointed at */
-  opacity: 0.35;
-  transition: opacity 0.12s ease;
-}
-.itemlist-row:hover .itemlist-del,
-.itemlist-row:focus-within .itemlist-del {
-  opacity: 1;
-}
-@media (prefers-reduced-motion: reduce) {
-  .itemlist-del {
-    transition: none;
-  }
-}
 .itemlist-row {
   display: flex;
   align-items: center;
@@ -465,11 +451,27 @@ span.itemlist-check {
   border-bottom: 1px solid rgba(255, 255, 255, 0.04);
   font-size: 12px;
 }
+/* rows behave like every other row in the app: hover (or a focused control) is
+   visible feedback. the per-track delete is NOT faded to 0.35 — that opacity
+   means "disabled" here (history's unreachable ↻), and a hover-only control is
+   a control nobody finds. */
+.itemlist-row:hover,
+.itemlist-row:focus-within {
+  background: rgba(255, 255, 255, 0.025);
+}
+.itemlist-row.selected {
+  background: rgba(255, 255, 255, 0.055);
+}
 .itemlist-row:last-child {
   border-bottom: none;
 }
 .itemlist-row.skipped {
   opacity: 0.55;
+}
+.itemlist-empty {
+  padding: 7px 10px;
+  font-size: 11.5px;
+  color: var(--faint);
 }
 .itemlist-idx {
   color: var(--faint);
@@ -604,6 +606,16 @@ span.itemlist-check {
 }
 .iconbtn.danger:hover {
   color: var(--red);
+}
+/* same disabled reading as .btn:disabled — an icon action that is temporarily
+   unavailable must not still light up on hover */
+.iconbtn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.iconbtn:disabled:hover {
+  background: none;
+  color: var(--muted);
 }
 .chev {
   color: var(--faint);
@@ -763,14 +775,25 @@ main.scrollpane::-webkit-scrollbar-thumb {
     display: none;
   }
 }
-/* progressive column hiding (D22): speed/eta drop first, never progress */
+/* progressive column hiding (D22): speed/eta drop first, never progress —
+ * the playlist `n/total` lives in the progress column and is the only place a
+ * playlist row states its progress. the queue table's thumbnail column (2)
+ * shifts progress to 4 and speed/eta to 5/6, so the queue and history tables
+ * name their own columns instead of sharing one positional rule (the shared
+ * 4/5 rule hid progress and kept a lone eta). */
 @media (max-width: 760px) {
-  table th:nth-child(4),
-  table td:nth-child(4),
-  table th:nth-child(5),
-  table td:nth-child(5),
-  table col:nth-child(4),
-  table col:nth-child(5) {
+  .qtable th:nth-child(5),
+  .qtable td:nth-child(5),
+  .qtable col:nth-child(5),
+  .qtable th:nth-child(6),
+  .qtable td:nth-child(6),
+  .qtable col:nth-child(6),
+  .hist-table th:nth-child(4),
+  .hist-table td:nth-child(4),
+  .hist-table col:nth-child(4),
+  .hist-table th:nth-child(5),
+  .hist-table td:nth-child(5),
+  .hist-table col:nth-child(5) {
     display: none;
   }
 }

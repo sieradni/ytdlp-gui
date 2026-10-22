@@ -175,8 +175,11 @@ function LogRow({ job }: { job: Job }) {
       <td colSpan={7}>
         {/* d94: playlist jobs list the actual tracks — id, title, and a
             per-item reveal. status: skipped items are dimmed with a marker.
-            d97: finished tracks can be deleted individually or in a batch. */}
-        {job.items.length > 0 && (
+            d97: finished tracks can be deleted individually or in a batch.
+            a finished playlist keeps its list even when every track was
+            deleted: without the empty state the expando collapsed back to a
+            bare log and a `0/10` row with no explanation. */}
+        {(job.items.length > 0 || (job.itemsTotal != null && canDelete)) && (
           <div className="itemlist">
             <div className="itemlist-h">
               {canDelete && deletable.length > 0 && (
@@ -210,8 +213,18 @@ function LogRow({ job }: { job: Job }) {
               )}
               {error && <span className="itemlist-err">{error}</span>}
             </div>
+            {job.items.length === 0 && (
+              <div className="itemlist-empty">no tracks left — a retry downloads them again</div>
+            )}
             {job.items.map((it) => (
-              <div key={it.vid} className={"itemlist-row" + (it.status === "skipped" ? " skipped" : "")}>
+              <div
+                key={it.vid}
+                className={
+                  "itemlist-row" +
+                  (it.status === "skipped" ? " skipped" : "") +
+                  (selected.has(it.vid) ? " selected" : "")
+                }
+              >
                 {canDelete &&
                   (it.path ? (
                     <input
@@ -618,7 +631,7 @@ export default function QueueTable() {
       </div>
       <div style={{ height: 400, display: "flex", flexDirection: "column" }}>
         <div style={{ overflow: "auto", flex: 1, minHeight: 0 }}>
-          <table>
+          <table className="qtable">
             <colgroup>
               <col style={{ width: 34 }} />
               <col style={{ width: 56 }} />

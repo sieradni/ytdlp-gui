@@ -3,6 +3,25 @@
 user-visible changes per release. releases are tagged `v2.0.0-alpha.N` until GA;
 older tags predate this file and carry no entry (see the release assets).
 
+## v2.0.0-alpha.15 — 2026-10-21
+
+playlist track list polish (no behaviour change)
+
+- **the per-track delete is always visible.** it used to sit at the same 35%
+  opacity this app uses for a *disabled* action (history's unreachable ↻), so
+  it read as unavailable until you happened to hover the row.
+- **track rows respond like every other row**: hover highlight, and selected
+  tracks keep a tint so a multi-selection is legible at a glance. an icon
+  action that is briefly unavailable (during a delete) now dims like a
+  disabled button instead of still lighting up.
+- **an emptied playlist keeps its track list** with "tracks (0 downloaded)" and
+  "no tracks left — a retry downloads them again", instead of collapsing to a
+  bare log and a `0/10` row with no explanation.
+- **the `n/total` count survives a narrow window.** below 760px the queue table
+  was hiding its progress column (where a playlist's count lives) and keeping a
+  lone, empty `eta`; it now drops speed/eta as intended, and the history table
+  keeps its own columns.
+
 ## v2.0.0-alpha.14 — 2026-10-21
 
 ### playlists clean up after themselves
