@@ -1389,16 +1389,27 @@ impl JobQueue {
                         };
                     };
 
-                    // expando row (§6) — every line, capped; frontend mirrors it
-                    let kind = crate::engine::parser::classify(&raw);
-                    self.push_log(id, raw.clone());
+                    // expando row (§6) — yt-dlp's own output, capped; the
+                    // frontend mirrors it. d99: the engine's protocol prints
+                    // (`__P__` progress, `__T__`/`__I__` counts, `__C__`
+                    // channel, `__N__` title, `__V__` item id) are consumed by
+                    // the parser, not read by the user — echoing them turned
+                    // the panel into a debug console with one progress line
+                    // per second. the filter lives here, at the one place the
+                    // transcript is written; parsing below still sees every
+                    // line, so progress, item tracking and cleanup are
+                    // untouched.
+                    if !crate::engine::parser::is_protocol(&raw) {
+                        let kind = crate::engine::parser::classify(&raw);
+                        self.push_log(id, raw.clone());
+                        let _ = self.app.emit(
+                            "job:log",
+                            serde_json::json!({ "id": id, "line": raw, "kind": kind }),
+                        );
+                    }
                     if raw.contains("has already been downloaded") {
                         skipped_existing = true;
                     }
-                    let _ = self.app.emit(
-                        "job:log",
-                        serde_json::json!({ "id": id, "line": raw, "kind": kind }),
-                    );
 
                     match parse_line(&raw) {
                         ParsedLine::Progress { downloaded, total, total_estimate, speed_bps, eta_sec } => {

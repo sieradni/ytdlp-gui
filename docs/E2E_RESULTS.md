@@ -51,3 +51,16 @@
 |---|---|---|---|
 | 24 | playlist cancel cleanup (D97) | PASS | queued playlist: ■ offered "cancel — will not start", job landed `stopped` ("cancelled before it started"), 0 files written, url re-queueable<br>running: ■ pressed while track 4 was mid-download → `stopped`, destination held exactly the 3 finished mp3s and **no** `.part`/`.ytdl`; row `itemsDone=3 itemsTotal=10 pct=null`, message "cancelled — unfinished track removed · 3 kept", 3 item records, 3 archive lines |
 | 25 | per-track delete (D97) | PASS | expanding the stopped row listed 3 tracks, each with a checkbox and a ✕<br>2 selected → "delete selected (2)" → confirm open → **cancel** → all 3 files still on disk<br>re-run → confirm: 2 files gone, 1 kept; 2 records gone, 1 kept; row `1/10`; archive down to 1 line<br>last track via its row ✕ → 0 files, 0 records, `0/10`, archive empty |
+
+## d99 live run (scenario 26)
+
+- run date: 2026-10-22
+- driver: real app (debug build + vite dev server) over WebView2 remote debugging,
+  sandboxed data dir + destination (`%TEMP%\d99-sandbox`, `%TEMP%\d99-dl`), 10-track
+  bandcamp album rate-limited to 120 kbps
+- script: `node scripts/e2e/probe-d99.cjs` (repeatable)
+- results: 11/11 assertions pass
+
+| # | scenario | result | evidence |
+|---|---|---|---|
+| 26 | expando transcript excludes engine protocol prints (D99) | PASS | running multi-minute playlist: `output` = 2 real `after_move` filepaths, **0** `__`-prefixed lines, rendered `.logwrap` text protocol-free; live state still parsed (`pct=0.0186`, title `Dive`)<br>cancel mid-track: `stopped`, "cancelled mid-track — removed 1 partial file(s)" + "cancelled — unfinished track removed · 2 kept" logged, no `.part` left, 2 files == 2 records == `2/10`, transcript still protocol-free<br>whole run produced 4 lines instead of one `__P__` per second |

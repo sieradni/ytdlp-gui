@@ -3,6 +3,16 @@
 user-visible changes per release. releases are tagged `v2.0.0-alpha.N` until GA;
 older tags predate this file and carry no entry (see the release assets).
 
+## v2.0.0-alpha.16 — 2026-10-22
+
+- **the expanded row shows yt-dlp's output instead of the engine's own prints.**
+  every internal protocol line (`__P__` progress above all, one per second) was
+  parsed for state *and* echoed into the log, so the panel read like a debug
+  console: a two-minute playlist produced ~120 of them around 2 real file
+  paths. protocol lines are now consumed by the parser only; the transcript is
+  the downloader's own output plus the app's messages (skips, cancel cleanup,
+  history/archive warnings). progress, counts and cancel cleanup are unchanged.
+
 ## v2.0.0-alpha.15 — 2026-10-21
 
 playlist track list polish (no behaviour change)

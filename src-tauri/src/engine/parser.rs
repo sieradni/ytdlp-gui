@@ -352,6 +352,28 @@ pub fn classify(raw: &str) -> LineKind {
     }
 }
 
+/// d99: is this one of the engine's own prints rather than yt-dlp output?
+///
+/// every internal print follows the same shape — `__<LETTER>__<payload>`, see
+/// `args.rs::ENGINE_FLAGS` (`__P__` progress, `__T__`/`__I__` counts, `__C__`
+/// channel, `__N__` title, `__V__` item id). the shape, not a list of known
+/// letters, is the test: a print added later cannot silently start leaking
+/// into the expando. malformed payloads that fall through to
+/// `ParsedLine::Line` (`__V__NA`, an all-NA `__P__`) match too — they are
+/// protocol noise whatever the parser made of them.
+///
+/// single owner of "should the user see this line": the stream path asks this
+/// before writing to the job transcript, and the ui never guesses.
+pub fn is_protocol(raw: &str) -> bool {
+    let t = raw.trim_start().as_bytes();
+    t.len() >= 5
+        && t[0] == b'_'
+        && t[1] == b'_'
+        && t[2].is_ascii_uppercase()
+        && t[3] == b'_'
+        && t[4] == b'_'
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -513,6 +535,53 @@ mod tests {
             other => panic!("item id print eaten: {other:?}"),
         }
         assert!(matches!(parse_line("__V__NA"), ParsedLine::Line(_)));
+    }
+
+    /// d99: the transcript filter. every internal print the engine emits —
+    /// including the malformed payloads that end up as `ParsedLine::Line` —
+    /// must be recognised as protocol and kept out of the expando; real
+    /// yt-dlp lines (and the engine's own human messages) must pass through.
+    #[test]
+    fn only_engine_prints_are_protocol_d99() {
+        for line in [
+            "__P__4977608|5513162|NA|122863.42|5",
+            "__P__NA|NA|NA|NA|NA",
+            "__T__10",
+            "__T__NA",
+            "__I__3|10|10",
+            "__I__NA|NA|NA",
+            "__C__2|NA|Tycho|Dive",
+            "__C__1|NA|NA|Dive",
+            "__N__Tycho - Hours",
+            "__N__NA",
+            "__V__4015900046",
+            "__V__NA",
+            "   __P__1|2|NA|3|4", // leading whitespace, verbatim stream shape
+        ] {
+            assert!(
+                is_protocol(line),
+                "engine print leaked into transcript: {line}"
+            );
+        }
+        for line in [
+            "[download] Destination: C:\\dl\\Hours [x].webm",
+            "[ExtractAudio] Destination: C:\\dl\\Hours [x].mp3",
+            "[download] 100% of 5.23MiB in 00:00:30 at 178.32KiB/s",
+            "[download] 473865125: Tycho - Hours has already been recorded in the archive",
+            "ERROR: [generic] nope: Unable to download webpage",
+            "WARNING: Falling back on generic information extractor",
+            "Title: Me at the zoo",
+            "C:\\dl\\Hours [x].mp3",
+            "already downloaded — skipping (archive)",
+            "cancelled mid-track — removed 1 partial file(s)",
+            "cancelled — unfinished track removed · 3 kept",
+            "__",
+            "__P_",
+            "____",
+            "",
+        ] {
+            assert!(!is_protocol(line), "transcript line eaten: {line}");
+        }
     }
 
     #[test]
