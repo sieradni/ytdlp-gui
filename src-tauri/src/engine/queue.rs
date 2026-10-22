@@ -15,8 +15,8 @@ use tokio::sync::{mpsc, Mutex as TokioMutex};
 use crate::engine::args::{build_download_argv, CookieKind, JobOptions, PlaylistMode};
 use crate::engine::parser::{parse_line, ParsedLine};
 use crate::engine::process;
-use crate::error::{other, AppResult};
 use crate::engine::thumbs::cache_fresh;
+use crate::error::{other, AppResult};
 use crate::store::{archive_append, archive_contains, default_archive_path, Db, JobRow};
 
 /// directory holding the app-managed ffmpeg (§4). passed to yt-dlp via
@@ -170,6 +170,36 @@ fn apply_retry_to_row(row: &mut JobRow, opts: &JobOptions, dest: &str) {
     row.items_done = None;
     row.items_total = None;
     row.error = None;
+    row.updated_at = crate::store::now_unix();
+}
+
+/// d97: outcome of deleting tracks from a playlist job (the ui reports the
+/// count; `remaining` is authoritative, not inferred from the event).
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ItemDeleteResult {
+    pub deleted: usize,
+    pub files_removed: usize,
+    pub remaining: Vec<crate::store::JobItem>,
+}
+
+/// d97: the row mutation after tracks were deleted — pure so it is testable.
+/// counts stay truthful (remaining records; the playlist's total is not
+/// rewritten — 9 of 10 is the truth after one track is gone) and the row's
+/// reveal path never points at a file that was just deleted.
+fn apply_item_deletion(
+    row: &mut JobRow,
+    remaining: &[crate::store::JobItem],
+    deleted_paths: &HashSet<String>,
+) {
+    row.items_done = Some(remaining.len() as u32);
+    if row
+        .final_path
+        .as_ref()
+        .is_some_and(|p| deleted_paths.contains(p))
+    {
+        row.final_path = remaining.iter().rev().find_map(|it| it.path.clone());
+    }
     row.updated_at = crate::store::now_unix();
 }
 
@@ -359,21 +389,39 @@ impl JobQueue {
 
     // ----- lifecycle (§6) -----
 
-    /// stop ■: kill the child, keep .part files → Stopped (D31).
+    /// stop ■: kill the child, keep .part files → Stopped (D31). a queued job
+    /// has no child to signal, so it is cancelled in place (d97) — the row
+    /// never runs, stays retryable, and its url is free to queue again.
     pub fn stop(&self, id: &str) -> AppResult<()> {
-        let tx = self
-            .inner
-            .lock()
-            .expect("queue lock")
-            .running
-            .get(id)
-            .cloned();
-        if let Some(tx) = tx {
+        // the lock is held across the queued-cancel decision for the same
+        // reason the dispatcher's claim is atomic (D96): a job that is being
+        // claimed right now must not be marked stopped underneath the run.
+        let mut inner = self.inner.lock().expect("queue lock");
+        if let Some(tx) = inner.running.get(id).cloned() {
+            drop(inner);
             let _ = tx.send(());
-            Ok(())
-        } else {
-            Err(other("job is not running"))
+            return Ok(());
         }
+        let rows = self.db.list_jobs()?;
+        let Some(row) = rows.iter().find(|r| r.id == id) else {
+            return Err(other("no such job"));
+        };
+        if row.state != "queued" {
+            return Err(other("job is not running"));
+        }
+        let mut row = row.clone();
+        row.state = "stopped".into();
+        row.error = Some("cancelled before it started".into());
+        row.updated_at = crate::store::now_unix();
+        self.save_row(&row);
+        inner.urls.remove(&url_of_options(&row.options));
+        drop(inner);
+        let _ = self.app.emit(
+            "job:update",
+            serde_json::json!({ "id": id, "state": "stopped", "error": row.error }),
+        );
+        self.emit_queue_changed();
+        Ok(())
     }
 
     /// retry ↻ (stopped/error) with the user's CURRENT composer options and
@@ -415,6 +463,84 @@ impl JobQueue {
         let _ = self.db.delete_job_items(id);
         self.emit_queue_changed();
         Ok(())
+    }
+
+    /// d97: delete finished tracks from a playlist job — the file on disk,
+    /// the archive entry (so a retry downloads it again) and the item record.
+    /// the rest of the playlist, its counts and its other files are untouched.
+    /// refused while the job is running: the live run rewrites the item list
+    /// at the stop/done boundary and would resurrect a deleted record.
+    pub fn delete_items(&self, id: &str, vids: &[String]) -> AppResult<ItemDeleteResult> {
+        let rows = self.db.list_jobs()?;
+        let Some(row) = rows.iter().find(|r| r.id == id) else {
+            return Err(other("no such job"));
+        };
+        if !JobState::is_removable(&row.state) {
+            return Err(other("cancel the playlist before deleting tracks"));
+        }
+        let items = self.db.list_job_items(id)?;
+        if items.is_empty() {
+            return Err(other("this job has no tracks"));
+        }
+        let mut matched = 0usize;
+        let mut deleted = 0usize;
+        let mut files_removed = 0usize;
+        let mut deleted_paths: HashSet<String> = HashSet::new();
+        let mut remaining: Vec<crate::store::JobItem> = Vec::new();
+        for it in items {
+            if !vids.iter().any(|v| v == &it.vid) {
+                remaining.push(it);
+                continue;
+            }
+            matched += 1;
+            if let Some(p) = &it.path {
+                let path = std::path::Path::new(p);
+                if path.is_file() {
+                    if std::fs::remove_file(path).is_err() {
+                        // locked/in use: keep the track AND its record — the
+                        // ui must never claim a file is gone while it is still
+                        // on disk.
+                        remaining.push(it);
+                        continue;
+                    }
+                    files_removed += 1;
+                    deleted_paths.insert(p.clone());
+                }
+            }
+            // the archive line is yt-dlp's per-item record; dropping it makes
+            // the deleted track downloadable again instead of silently skipped.
+            let _ = crate::store::archive_remove_vids(
+                &default_archive_path(),
+                std::slice::from_ref(&it.vid),
+            );
+            let _ = self.db.delete_job_item(id, &it.vid);
+            deleted += 1;
+        }
+        if matched == 0 {
+            return Err(other("no matching tracks"));
+        }
+        if deleted == 0 {
+            return Err(other("could not delete the track — the file may be in use"));
+        }
+        let mut row = self.row(id);
+        apply_item_deletion(&mut row, &remaining, &deleted_paths);
+        self.save_row(&row);
+        let _ = self.app.emit(
+            "job:update",
+            serde_json::json!({
+                "id": id,
+                "items": &remaining,
+                "itemsDone": row.items_done,
+                "itemsTotal": row.items_total,
+                "finalPath": row.final_path,
+            }),
+        );
+        self.emit_queue_changed();
+        Ok(ItemDeleteResult {
+            deleted,
+            files_removed,
+            remaining,
+        })
     }
 
     /// remove ✕: queued/stopped/error/done → drop entry. never touches
@@ -495,10 +621,10 @@ impl JobQueue {
                     // atomically with the oldest-queued pick (d96; a db
                     // read under the lock is fine — no awaits, no
                     // re-entrancy).
-                    let oldest = q.db
-                        .list_jobs()
-                        .ok()
-                        .and_then(|rows| rows.into_iter().find(|r| r.state == "queued"));
+                    let oldest =
+                        q.db.list_jobs()
+                            .ok()
+                            .and_then(|rows| rows.into_iter().find(|r| r.state == "queued"));
                     inner.claim_next(oldest)
                 };
                 if let Some((id, options, dest, rx)) = next {
@@ -680,13 +806,20 @@ impl JobQueue {
                         let db = Arc::clone(&self.db);
                         let id2 = id.clone();
                         let key = key.to_owned();
-                        let (ex, vid) = key.split_once(' ').map(|(a, b)| (a.to_owned(), b.to_owned())).unwrap_or_default();
+                        let (ex, vid) = key
+                            .split_once(' ')
+                            .map(|(a, b)| (a.to_owned(), b.to_owned()))
+                            .unwrap_or_default();
                         let url2 = url.clone();
                         let ex2 = ex.clone();
                         let cookies = opts.cookies.clone();
                         tauri::async_runtime::spawn(async move {
                             if let Some(p) = crate::engine::thumbs::ensure_remote_art(
-                                &key, &vid, &url2, &ex2, Some(&cookies),
+                                &key,
+                                &vid,
+                                &url2,
+                                &ex2,
+                                Some(&cookies),
                             )
                             .await
                             {
@@ -739,7 +872,11 @@ impl JobQueue {
                     let cookies = opts.cookies.clone();
                     tauri::async_runtime::spawn(async move {
                         if let Some(p) = crate::engine::thumbs::ensure_remote_art(
-                            &key, &vid, &url2, &ex, Some(&cookies),
+                            &key,
+                            &vid,
+                            &url2,
+                            &ex,
+                            Some(&cookies),
                         )
                         .await
                         {
@@ -799,19 +936,36 @@ impl JobQueue {
                 &id,
                 &argv,
                 &mut stop_rx,
-                identity.as_ref().map(|i| (i.is_playlist, i.extractor.as_str())),
+                identity
+                    .as_ref()
+                    .map(|i| (i.is_playlist, i.extractor.as_str())),
             )
             .await;
 
         // ---- finalize ----
         match outcome {
-            RunOutcome::Stopped => {
-                self.finalize(
-                    &id,
-                    JobState::Stopped,
-                    Some("stopped by user — partial files kept".into()),
-                )
-                .await;
+            RunOutcome::Stopped { removed, kept } => {
+                // d97: a cancelled playlist cleaned up after itself, so its
+                // message names what happened instead of promising debris.
+                // single videos keep their partials for retry-resume (D31).
+                let is_playlist = identity.as_ref().is_some_and(|i| i.is_playlist);
+                let msg = if is_playlist {
+                    // short enough for the row's one-line meta: the count
+                    // also reads in the progress cell and the track header.
+                    let mut m = String::from("cancelled");
+                    if removed > 0 {
+                        m.push_str(" — unfinished track removed");
+                    }
+                    match kept {
+                        0 => {}
+                        1 => m.push_str(" · 1 kept"),
+                        n => m.push_str(&format!(" · {n} kept")),
+                    }
+                    m
+                } else {
+                    "stopped by user — partial files kept".into()
+                };
+                self.finalize(&id, JobState::Stopped, Some(msg)).await;
             }
             RunOutcome::Error(msg) => {
                 let msg = rewrite_cookie_error(&rewrite_botgate_error(
@@ -893,9 +1047,9 @@ impl JobQueue {
                             extractor: ex.to_owned(),
                             vid: vid.to_owned(),
                             url: Some(url.clone()),
-                            title: title.clone().or_else(|| self.row(&id).title),                                // d94: the channel print finally feeds the dead
-                                // column (upsert COALESCE keeps an older value)
-                                channel: run_channel.clone(),
+                            title: title.clone().or_else(|| self.row(&id).title), // d94: the channel print finally feeds the dead
+                            // column (upsert COALESCE keeps an older value)
+                            channel: run_channel.clone(),
                             duration_sec: meta.as_ref().and_then(|m| m.duration_sec).map(i64::from),
                             size_bytes: meta
                                 .as_ref()
@@ -968,7 +1122,10 @@ impl JobQueue {
                         }),
                     );
                     for it in items.iter().filter(|it| it.status == "done") {
-                        if let (Some(path), Some((ex, vid))) = (&it.path, identity_key.as_deref().and_then(|k| k.split_once(' '))) {
+                        if let (Some(path), Some((ex, vid))) = (
+                            &it.path,
+                            identity_key.as_deref().and_then(|k| k.split_once(' ')),
+                        ) {
                             let app = self.app.clone();
                             let db = Arc::clone(&self.db);
                             let id2 = id.clone();
@@ -1004,9 +1161,11 @@ impl JobQueue {
                     let path = path.clone();
                     tauri::async_runtime::spawn(async move {
                         if let Some(k) = key {
-                            if let Some(p) =
-                                crate::engine::thumbs::ensure_local_art(&k, std::path::Path::new(&path))
-                                    .await
+                            if let Some(p) = crate::engine::thumbs::ensure_local_art(
+                                &k,
+                                std::path::Path::new(&path),
+                            )
+                            .await
                             {
                                 let ps = p.to_string_lossy().into_owned();
                                 let _ = db.set_job_thumb(&id2, Some(&ps));
@@ -1093,6 +1252,10 @@ impl JobQueue {
         stop_rx: &mut mpsc::UnboundedReceiver<()>,
         playlist: Option<(bool, &str)>,
     ) -> RunOutcome {
+        // d97: the cancel sweep's time floor — every file this run writes is
+        // at or after it, so a finished file from an earlier download of the
+        // same id (older mtime) can never be mistaken for an artifact.
+        let run_started = std::time::SystemTime::now();
         let mut child = match process::spawn(argv) {
             Ok(c) => c,
             Err(e) => return RunOutcome::Error(format!("spawn failed: {e}")),
@@ -1130,6 +1293,10 @@ impl JobQueue {
             std::collections::HashMap::new();
         let mut last_channel: Option<String> = None;
         let mut last_item_vid: Option<String> = None;
+        // d97: the item STARTED but not yet finished — the one a cancel
+        // interrupts. set by the __V__ print (pre_process), unlike
+        // last_item_vid which only exists in verbose runs.
+        let mut current_item_vid: Option<String> = None;
         // d94: a __N__ title that arrives before any __I__ (single videos)
         // parks here until the item identity is known.
         let mut last_pending_title: Option<String> = None;
@@ -1138,29 +1305,65 @@ impl JobQueue {
             tokio::select! {
                 _ = stop_rx.recv() => {
                     child.kill().await;
-                    // d94/ADVERSARIAL-REVIEW: a stopped playlist keeps the
-                    // records of items that FINISHED (real path) or were
-                    // ARCHIVE-SKIPPED (status=skipped — they never get a path
-                    // but were genuinely processed); started-but-unfinished
-                    // items are dropped — the list must never claim a file
-                    // that isn't there.
-                    if playlist.is_some_and(|(is_pl, _)| is_pl) && !collected_items.is_empty() {
+                    let mut removed = 0usize;
+                    let mut kept = 0usize;
+                    // d97: a cancelled playlist does not leave the interrupted
+                    // track behind. the tree is already dead (kill awaited), so
+                    // nothing can write the files again; the sweep is scoped to
+                    // the __V__ id and to files this run wrote.
+                    if playlist.is_some_and(|(is_pl, _)| is_pl) {
+                        if let Some(vid) = current_item_vid.as_deref() {
+                            let dest = self.row(id).dest;
+                            removed = crate::store::sweep_inflight_item(
+                                std::path::Path::new(&dest),
+                                vid,
+                                run_started,
+                            );
+                            if removed > 0 {
+                                self.push_log(
+                                    id,
+                                    format!("cancelled mid-track — removed {removed} partial file(s)"),
+                                );
+                            }
+                        }
+                        // d94/ADVERSARIAL-REVIEW: a stopped playlist keeps the
+                        // records of items that FINISHED (real path) or were
+                        // ARCHIVE-SKIPPED (status=skipped — they never get a
+                        // path but were genuinely processed); the unfinished
+                        // item is dropped — the list must never claim a file
+                        // that isn't there.
                         let finished: Vec<crate::store::JobItem> = collected_items
                             .into_values()
                             .filter(|it| it.path.is_some() || it.status == "skipped")
                             .collect();
-                        if !finished.is_empty() {
-                            let _ = self.db.replace_job_items(id, &finished);
-                            let _ = self.app.emit(
-                                "job:update",
-                                serde_json::json!({
-                                    "id": id,
-                                    "items": self.db.list_job_items(id).unwrap_or_default(),
-                                }),
-                            );
-                        }
+                        kept = finished.len();
+                        let _ = self.db.replace_job_items(id, &finished);
+                        // d97: the cancel boundary owns the playlist counts.
+                        // the throttled run writes never persist them, which is
+                        // why a stopped playlist used to fall back to the
+                        // interrupted track's byte percent with no denominator.
+                        let mut row = self.row(id);
+                        row.items_done = Some(kept as u32);
+                        row.items_total = items_total.or(row.items_total);
+                        row.pct = None;
+                        row.speed_bps = None;
+                        row.eta_sec = None;
+                        row.updated_at = crate::store::now_unix();
+                        self.save_row(&row);
+                        let _ = self.app.emit(
+                            "job:update",
+                            serde_json::json!({
+                                "id": id,
+                                "items": self.db.list_job_items(id).unwrap_or_default(),
+                                "itemsDone": kept,
+                                "itemsTotal": row.items_total,
+                                "pct": null,
+                                "speedBps": null,
+                                "etaSec": null,
+                            }),
+                        );
                     }
-                    return RunOutcome::Stopped;
+                    return RunOutcome::Stopped { removed, kept };
                 }
                 line = rx.recv() => {
                     let Some((_is_stdout, raw)) = line else {
@@ -1406,6 +1609,11 @@ impl JobQueue {
                                 }
                             }
                         }
+                        ParsedLine::ItemVid(vid) => {
+                            // d97: the item is starting — remember it so a
+                            // cancel can clean up exactly this track.
+                            current_item_vid = Some(vid);
+                        }
                         ParsedLine::ItemTitle(item_title) => {
                             // d94: per-item title from the engine's __N__ print
                             // — the ONLY per-item title signal in normal runs
@@ -1635,7 +1843,12 @@ enum RunOutcome {
         items: Vec<crate::store::JobItem>,
         channel: Option<String>,
     },
-    Stopped,
+    Stopped {
+        /// files swept for the interrupted track (d97)
+        removed: usize,
+        /// finished/skipped tracks the cancel preserved
+        kept: usize,
+    },
     Error(String),
 }
 
@@ -2098,6 +2311,68 @@ mod tests {
         assert!(!row.skipped && row.items_done.is_none() && row.items_total.is_none());
         // the resolved id persists — retry's old-dest sweep keys on it
         assert_eq!(row.vid.as_deref(), Some("x"));
+    }
+
+    /// d97: deleting tracks keeps the row truthful — the count is what is
+    /// left, and the reveal path moves off a file that is now gone.
+    #[test]
+    fn item_deletion_recounts_and_moves_the_reveal_path_d97() {
+        let items = [
+            crate::store::JobItem {
+                idx: 1,
+                vid: "a".into(),
+                title: None,
+                path: Some(r"C:\dl\a.mp3".into()),
+                status: "done".into(),
+            },
+            crate::store::JobItem {
+                idx: 2,
+                vid: "b".into(),
+                title: None,
+                path: Some(r"C:\dl\b.mp3".into()),
+                status: "done".into(),
+            },
+            crate::store::JobItem {
+                idx: 3,
+                vid: "c".into(),
+                title: None,
+                path: None,
+                status: "skipped".into(),
+            },
+        ];
+        let mut row = d96_row("j");
+        row.items_done = Some(3);
+        row.items_total = Some(10);
+        row.final_path = Some(r"C:\dl\b.mp3".into());
+
+        // delete the track the row was pointing at
+        let mut deleted = HashSet::new();
+        deleted.insert(r"C:\dl\b.mp3".to_owned());
+        let remaining = vec![items[0].clone(), items[2].clone()];
+        apply_item_deletion(&mut row, &remaining, &deleted);
+        assert_eq!(
+            row.items_done,
+            Some(2),
+            "records left, not the original run size"
+        );
+        assert_eq!(
+            row.items_total,
+            Some(10),
+            "playlist size stays the playlist size"
+        );
+        assert_eq!(row.final_path.as_deref(), Some(r"C:\dl\a.mp3"));
+
+        // deleting a track that was not the reveal target leaves it alone
+        let before = row.final_path.clone();
+        apply_item_deletion(&mut row, &remaining, &HashSet::new());
+        assert_eq!(row.final_path, before);
+
+        // no finished track left → no reveal target
+        let only_skipped = vec![items[2].clone()];
+        let mut gone: HashSet<String> = HashSet::new();
+        gone.insert(r"C:\dl\a.mp3".to_owned());
+        apply_item_deletion(&mut row, &only_skipped, &gone);
+        assert_eq!(row.final_path, None);
     }
 
     #[test]

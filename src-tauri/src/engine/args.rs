@@ -181,6 +181,12 @@ const ENGINE_FLAGS: &[&str] = &[
     "pre_process:__C__%(playlist_index)s|%(channel)s|%(uploader)s|%(playlist_title)s",
     "--print",
     "pre_process:__N__%(title)s",
+    // d97: the item's id at item start. the final path print only arrives
+    // after the item COMPLETES, so without this the engine cannot name the
+    // track that is in flight when the user cancels — and cannot clean up
+    // its .part/intermediate artifacts. one line per item, like __N__.
+    "--print",
+    "pre_process:__V__%(id)s",
     // playlist-level total print: fires ONCE per playlist run even when
     // every item is archive-skipped (e2e find: pre_process doesn't fire for
     // skips, so a fully-archived playlist would otherwise end with no
@@ -473,6 +479,8 @@ mod tests {
             "pre_process:__C__%(playlist_index)s|%(channel)s|%(uploader)s|%(playlist_title)s"
         ));
         assert!(s.contains("pre_process:__N__%(title)s"));
+        // d97: the in-flight item's id (cancel cleanup keys on it)
+        assert!(s.contains("pre_process:__V__%(id)s"));
         assert!(s.contains("--no-playlist"));
         assert!(s.contains(r"-P C:\dl"));
         assert!(s.contains("-f ba/b"));

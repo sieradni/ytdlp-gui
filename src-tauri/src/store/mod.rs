@@ -263,7 +263,12 @@ impl Db {
         Ok(())
     }
 
-    pub fn set_history_thumb(&self, extractor: &str, vid: &str, thumb: Option<&str>) -> AppResult<()> {
+    pub fn set_history_thumb(
+        &self,
+        extractor: &str,
+        vid: &str,
+        thumb: Option<&str>,
+    ) -> AppResult<()> {
         self.conn().execute(
             "UPDATE history SET thumb=?3 WHERE extractor=?1 AND vid=?2",
             rusqlite::params![extractor, vid, thumb],
@@ -313,6 +318,15 @@ impl Db {
     pub fn delete_job_items(&self, job_id: &str) -> AppResult<()> {
         self.conn()
             .execute("DELETE FROM job_items WHERE job_id=?1", [job_id])?;
+        Ok(())
+    }
+
+    /// d97: forget one track of a playlist job (the user deleted it).
+    pub fn delete_job_item(&self, job_id: &str, vid: &str) -> AppResult<()> {
+        self.conn().execute(
+            "DELETE FROM job_items WHERE job_id=?1 AND vid=?2",
+            rusqlite::params![job_id, vid],
+        )?;
         Ok(())
     }
 
@@ -595,19 +609,40 @@ pub fn merge_into_archive(path: &std::path::Path, text: &str) -> AppResult<usize
 /// the number of lines removed (0 = nothing matched, file untouched).
 pub fn archive_remove(path: &std::path::Path, entries: &[(String, String)]) -> AppResult<usize> {
     use std::collections::HashSet;
-    let existing = std::fs::read_to_string(path).unwrap_or_default();
     let targets: HashSet<(String, String)> = entries
         .iter()
         .map(|(e, v)| (e.to_ascii_lowercase(), v.trim().to_owned()))
         .collect();
+    rewrite_archive(path, |ex, vid| {
+        targets.contains(&(ex.to_ascii_lowercase(), vid.trim().to_owned()))
+    })
+}
+
+/// d97: drop archive lines by track id, whatever the extractor — a deleted
+/// playlist track must be downloadable again, and job_items records don't
+/// carry the extractor. same atomic rewrite as `archive_remove`.
+pub fn archive_remove_vids(path: &std::path::Path, vids: &[String]) -> AppResult<usize> {
+    use std::collections::HashSet;
+    let targets: HashSet<&str> = vids.iter().map(|v| v.trim()).collect();
+    rewrite_archive(path, |_, vid| targets.contains(vid.trim()))
+}
+
+/// atomic archive rewrite preserving every kept line verbatim (comments and
+/// append order included). returns the number of lines dropped; 0 leaves the
+/// file untouched.
+fn rewrite_archive(
+    path: &std::path::Path,
+    drop_line: impl Fn(&str, &str) -> bool,
+) -> AppResult<usize> {
+    let existing = std::fs::read_to_string(path).unwrap_or_default();
     let mut out = String::with_capacity(existing.len());
     let mut removed = 0usize;
     for line in existing.lines() {
-        let drop_it = match line.trim().split_once(' ') {
-            Some((ex, vid)) => targets.contains(&(ex.to_ascii_lowercase(), vid.trim().to_owned())),
+        let gone = match line.trim().split_once(' ') {
+            Some((ex, vid)) => drop_line(ex, vid),
             None => false,
         };
-        if drop_it {
+        if gone {
             removed += 1;
         } else {
             out.push_str(line);
@@ -636,6 +671,58 @@ pub fn count_archive_ids(path: &std::path::Path) -> u64 {
 /// default archive location (§4 layout): app-data\downloaded.txt.
 pub fn default_archive_path() -> std::path::PathBuf {
     crate::binaries::manager::app_data_dir().join("downloaded.txt")
+}
+
+/// d97: remove the artifacts of the track that was IN FLIGHT when a playlist
+/// was cancelled. scoped to the item's resolved `[<vid>]` filename marker;
+/// `.part/.ytdl/.temp` are incomplete by definition and always go, while any
+/// other file (a merged-but-not-converted container, a thumbnail sidecar) is
+/// removed only when it was written during this run — a finished file from an
+/// earlier download of the same id keeps its older mtime and survives. the
+/// tracks that already completed belong to other ids and are never touched.
+/// missing dir is a no-op; returns how many files went away.
+pub fn sweep_inflight_item(
+    dir: &std::path::Path,
+    vid: &str,
+    run_started: std::time::SystemTime,
+) -> usize {
+    if vid.is_empty() {
+        return 0;
+    }
+    // windows stamps files from a coarser clock than SystemTime::now, so a
+    // file written right at the start of the run can carry an mtime a few
+    // milliseconds BEFORE the floor. one second of margin covers that without
+    // reaching a file an earlier download finished.
+    let floor = run_started
+        .checked_sub(std::time::Duration::from_secs(1))
+        .unwrap_or(run_started);
+    let marker = format!(" [{vid}]");
+    let part_exts: [&str; 3] = [".part", ".ytdl", ".temp"];
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut removed = 0usize;
+    for entry in rd.filter_map(|e| e.ok()) {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !name.contains(&marker) {
+            continue;
+        }
+        let partial = part_exts.iter().any(|x| name.ends_with(x));
+        if !partial {
+            let fresh = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .map(|t| t >= floor)
+                .unwrap_or(false);
+            if !fresh {
+                continue;
+            }
+        }
+        if std::fs::remove_file(entry.path()).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
 }
 
 /// d88: remove one job's leftover download artifacts from a destination
@@ -725,6 +812,36 @@ mod tests {
 
         db.delete_job("a").unwrap();
         assert_eq!(db.list_jobs().unwrap().len(), 1);
+    }
+
+    /// d97: deleting one track removes its row and leaves the rest of the
+    /// playlist intact (idx is the playlist position, never renumbered).
+    #[test]
+    fn delete_job_item_drops_only_that_track_d97() {
+        let db = Db::open_in_memory().unwrap();
+        let items = vec![
+            JobItem {
+                idx: 1,
+                vid: "a".into(),
+                title: Some("one".into()),
+                path: Some(r"C:\dl\a.mp3".into()),
+                status: "done".into(),
+            },
+            JobItem {
+                idx: 2,
+                vid: "b".into(),
+                title: Some("two".into()),
+                path: Some(r"C:\dl\b.mp3".into()),
+                status: "done".into(),
+            },
+        ];
+        db.replace_job_items("job", &items).unwrap();
+        db.delete_job_item("job", "a").unwrap();
+        let left = db.list_job_items("job").unwrap();
+        assert_eq!(left.len(), 1);
+        assert_eq!((left[0].vid.as_str(), left[0].idx), ("b", 2));
+        db.delete_job_items("job").unwrap();
+        assert!(db.list_job_items("job").unwrap().is_empty());
     }
 
     #[test]
@@ -910,6 +1027,74 @@ mod tests {
         // missing file is not an error
         let n3 = archive_remove(&dir.join("nope.txt"), &[("youtube".into(), "x".into())]).unwrap();
         assert_eq!(n3, 0);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// d97: a deleted playlist track must be downloadable again; the archive
+    /// line is keyed by id only (job_items has no extractor).
+    #[test]
+    fn archive_remove_vids_drops_the_track_whatever_the_extractor() {
+        let dir = std::env::temp_dir().join(format!("yg-arch-vid-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("downloaded.txt");
+        std::fs::write(
+            &p,
+            "bandcamp 473865125\nyoutube 473865125\nsoundcloud keep-me\n",
+        )
+        .unwrap();
+        let n = archive_remove_vids(&p, &["473865125".to_owned()]).unwrap();
+        assert_eq!(n, 2, "both lines for that id");
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert_eq!(text, "soundcloud keep-me\n");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// d97: cancel cleanup only touches the interrupted item — its partials
+    /// always, its other fresh artifacts only when this run wrote them, never
+    /// a finished file from an earlier download, never another track.
+    #[test]
+    fn sweep_inflight_item_is_marker_and_time_scoped_d97() {
+        let dir = std::env::temp_dir().join(format!("yg-inflight-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // a pre-existing FINISHED file for the same id (re-download cancel):
+        // written before this run's floor, so it can never be mistaken for an
+        // artifact even though it carries the same marker.
+        let old = dir.join("Hours [v2].mp3");
+        std::fs::write(&old, b"done").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1200));
+        let run_started = std::time::SystemTime::now();
+        // the interrupted track mid-download
+        std::fs::write(dir.join("Hours [v2].mp3.part"), b"x").unwrap();
+        std::fs::write(dir.join("Hours [v2].mp3.ytdl"), b"x").unwrap();
+        // a merged-but-not-converted container + sidecar written this run
+        std::fs::write(dir.join("Hours [v2].webm"), b"x").unwrap();
+        std::fs::write(dir.join("Hours [v2].webp"), b"x").unwrap();
+        // completed track + another track's fresh file must survive
+        std::fs::write(dir.join("Walk [v1].mp3"), b"x").unwrap();
+        std::fs::write(dir.join("Other [v3].webm"), b"x").unwrap();
+
+        // partials go regardless of time (they are incomplete by definition)
+        let future = run_started + std::time::Duration::from_secs(3600);
+        assert_eq!(sweep_inflight_item(&dir, "v2", future), 2, "partials only");
+        assert!(old.exists(), "a finished file from an earlier run survives");
+
+        // within this run, the fresh intermediates and sidecars go too
+        assert_eq!(
+            sweep_inflight_item(&dir, "v2", run_started),
+            2,
+            "webm + webp"
+        );
+        assert!(old.exists(), "still the finished file");
+        assert!(dir.join("Walk [v1].mp3").exists());
+        assert!(
+            dir.join("Other [v3].webm").exists(),
+            "another track is never touched"
+        );
+
+        assert_eq!(sweep_inflight_item(&dir, "", run_started), 0);
+        assert_eq!(sweep_inflight_item(&dir.join("nope"), "v2", run_started), 0);
         std::fs::remove_dir_all(&dir).ok();
     }
 

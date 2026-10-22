@@ -3,6 +3,7 @@ import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { useQueue, type SortKey } from "../stores/queue";
 import type { Job } from "../lib/ipc";
 import { Thumb } from "./Thumb";
+import { confirmDialog } from "./ConfirmDialog";
 
 /** C7: reveal-in-explorer whenever a real file exists behind the row
  * (done, skipped, or error-with-file). async probe like history's —
@@ -62,7 +63,17 @@ function Actions({ job }: { job: Job }) {
         </button>
       )}
       {(job.state === "downloading" || job.state === "post" || job.state === "queued") && (
-        <button className="iconbtn" title="stop — keeps partial files" onClick={() => void stop(job.id)}>
+        <button
+          className="iconbtn"
+          title={
+            job.state === "queued"
+              ? "cancel — it will not start"
+              : job.itemsTotal != null || job.items.length > 0
+                ? "cancel — removes the unfinished track"
+                : "stop — keeps partial files"
+          }
+          onClick={() => void stop(job.id)}
+        >
           ■
         </button>
       )}
@@ -97,25 +108,122 @@ function Actions({ job }: { job: Job }) {
 
 function LogRow({ job }: { job: Job }) {
   const open = useQueue((s) => s.expanded.has(job.id));
+  const deleteItems = useQueue((s) => s.deleteItems);
   const ref = useRef<HTMLDivElement>(null);
+  // d97: per-track deletion. only finished tracks (a file on disk) are
+  // deletable — an archive-skipped track never produced one.
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const deletable = job.items.filter((it) => it.path);
+  const allSelected = deletable.length > 0 && deletable.every((it) => selected.has(it.vid));
+  // d97: the engine refuses track deletion mid-run (the live run rewrites the
+  // item list at the stop/done boundary), so the controls must not offer it.
+  const canDelete = job.state !== "downloading" && job.state !== "post";
+
   useEffect(() => {
     if (open && ref.current) ref.current.scrollTop = ref.current.scrollHeight;
   }, [open, job.output.length]);
+
+  // a reload can remove tracks under us (another delete, a retry rebuilding
+  // the list) — never keep a selection for a track that is gone.
+  useEffect(() => {
+    setSelected((prev) => {
+      const live = new Set(job.items.map((it) => it.vid));
+      const next = new Set([...prev].filter((vid) => live.has(vid)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [job.items]);
+
   if (!open) return null;
+
+  const toggle = (vid: string) =>
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(vid)) next.delete(vid);
+      else next.add(vid);
+      return next;
+    });
+
+  const deleteTracks = async (vids: string[]) => {
+    if (vids.length === 0 || busy) return;
+    const titles = job.items.filter((it) => vids.includes(it.vid)).map((it) => it.title ?? it.vid);
+    const many = titles.length > 1;
+    const what = many ? `${titles.length} tracks` : `“${titles[0] ?? "this track"}”`;
+    const ok = await confirmDialog({
+      title: many ? "delete these tracks?" : "delete this track?",
+      body: `${what} will be removed from disk and from the download archive, so it downloads again next time. The rest of the playlist stays exactly as it is.`,
+      confirmLabel: many ? `delete ${titles.length} tracks` : "delete track",
+      cancelLabel: "keep",
+      kind: "warning",
+    });
+    if (!ok) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await deleteItems(job.id, vids);
+      setSelected(new Set());
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <tr className="log-row">
       <td colSpan={7}>
         {/* d94: playlist jobs list the actual tracks — id, title, and a
-            per-item reveal. status: skipped items are dimmed with a marker. */}
+            per-item reveal. status: skipped items are dimmed with a marker.
+            d97: finished tracks can be deleted individually or in a batch. */}
         {job.items.length > 0 && (
           <div className="itemlist">
             <div className="itemlist-h">
-              tracks ({job.items.filter((it) => it.status === "done").length} downloaded
-              {job.items.some((it) => it.status === "skipped") &&
-                `, ${job.items.filter((it) => it.status === "skipped").length} skipped`})
+              {canDelete && deletable.length > 0 && (
+                <input
+                  type="checkbox"
+                  className="itemlist-check"
+                  title="select all downloaded tracks"
+                  aria-label="select all downloaded tracks"
+                  checked={allSelected}
+                  ref={(el) => {
+                    if (el) el.indeterminate = selected.size > 0 && !allSelected;
+                  }}
+                  onChange={() =>
+                    setSelected(allSelected ? new Set() : new Set(deletable.map((it) => it.vid)))
+                  }
+                />
+              )}
+              <span>
+                tracks ({job.items.filter((it) => it.status === "done").length} downloaded
+                {job.items.some((it) => it.status === "skipped") &&
+                  `, ${job.items.filter((it) => it.status === "skipped").length} skipped`})
+              </span>
+              {canDelete && selected.size > 0 && (
+                <button
+                  className="btn sm danger itemlist-action"
+                  disabled={busy}
+                  onClick={() => void deleteTracks([...selected])}
+                >
+                  delete selected ({selected.size})
+                </button>
+              )}
+              {error && <span className="itemlist-err">{error}</span>}
             </div>
             {job.items.map((it) => (
               <div key={it.vid} className={"itemlist-row" + (it.status === "skipped" ? " skipped" : "")}>
+                {canDelete &&
+                  (it.path ? (
+                    <input
+                      type="checkbox"
+                      className="itemlist-check"
+                      aria-label={`select ${it.title ?? it.vid}`}
+                      checked={selected.has(it.vid)}
+                      onChange={() => toggle(it.vid)}
+                    />
+                  ) : (
+                    <span className="itemlist-check" aria-hidden="true" />
+                  ))}
                 <span className="itemlist-idx">{it.idx}</span>
                 <span className="itemlist-title" title={it.title ?? it.vid}>
                   {it.title ?? it.vid}
@@ -128,6 +236,16 @@ function LogRow({ job }: { job: Job }) {
                     onClick={() => void revealItemInDir(it.path!).catch(() => {})}
                   >
                     📁
+                  </button>
+                )}
+                {canDelete && it.path && (
+                  <button
+                    className="iconbtn danger itemlist-del"
+                    title="delete this track — removes the file and its archive entry"
+                    disabled={busy}
+                    onClick={() => void deleteTracks([it.vid])}
+                  >
+                    ✕
                   </button>
                 )}
               </div>
@@ -410,7 +528,15 @@ export default function QueueTable() {
       <div className="card-h">
         <h2>queue</h2>
         <div className="flex items-center gap-2">
-          <button className="btn sm" onClick={() => void (paused ? resume() : pause())}>
+          <button
+            className="btn sm"
+            title={
+              paused
+                ? "resume — queued jobs start again"
+                : "pause — no new jobs start; running downloads continue"
+            }
+            onClick={() => void (paused ? resume() : pause())}
+          >
             {paused ? "resume" : "pause"}
           </button>
           <button

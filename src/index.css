@@ -413,12 +413,49 @@ tbody tr:hover {
   overflow: hidden;
 }
 .itemlist-h {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   font-size: 11px;
   font-weight: 700;
   color: var(--muted);
   padding: 5px 10px;
   background: rgba(255, 255, 255, 0.03);
   border-bottom: 1px solid var(--border);
+}
+/* d97: track selection + per-track delete */
+.itemlist-check {
+  width: 14px;
+  height: 14px;
+  flex: none;
+  margin: 0;
+  accent-color: var(--amber);
+  cursor: pointer;
+}
+span.itemlist-check {
+  cursor: default;
+}
+.itemlist-action {
+  margin-left: auto;
+}
+.itemlist-err {
+  color: var(--red);
+  font-weight: 400;
+  margin-left: auto;
+}
+.itemlist-del {
+  /* discoverable without shouting: quiet until the row is pointed at */
+  opacity: 0.35;
+  transition: opacity 0.12s ease;
+}
+.itemlist-row:hover .itemlist-del,
+.itemlist-row:focus-within .itemlist-del {
+  opacity: 1;
+}
+@media (prefers-reduced-motion: reduce) {
+  .itemlist-del {
+    transition: none;
+  }
 }
 .itemlist-row {
   display: flex;
@@ -441,6 +478,8 @@ tbody tr:hover {
   text-align: right;
 }
 .itemlist-title {
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

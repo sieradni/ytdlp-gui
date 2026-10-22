@@ -136,6 +136,7 @@ pub fn run() {
             commands::jobs::job_stop,
             commands::jobs::job_retry_options,
             commands::jobs::job_remove,
+            commands::jobs::job_item_delete,
             commands::jobs::queue_list,
             commands::jobs::queue_pause,
             commands::jobs::queue_resume,

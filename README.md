@@ -52,7 +52,7 @@ cargo test --manifest-path src-tauri/Cargo.toml
 
 ## Releases
 
-Pushing a tag `v*` runs `.github/workflows/release.yml`: builds the NSIS installer, signs the updater artifacts, and publishes the GitHub release with `latest.json` for the in-app updater. Versions are `v2.0.0-alpha.N` until GA.
+Pushing a tag `v*` runs `.github/workflows/release.yml`: builds the NSIS installer, signs the updater artifacts, and publishes the GitHub release with `latest.json` for the in-app updater. Versions are `v2.0.0-alpha.N` until GA; user-visible changes are in [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use serde::Serialize;
 
 use crate::engine::args::JobOptions;
-use crate::engine::queue::Job;
+use crate::engine::queue::{ItemDeleteResult, Job};
 use crate::error::AppResult;
 use crate::store::archive_contains;
 
@@ -100,6 +100,18 @@ pub fn job_retry_options(
 #[tauri::command]
 pub fn job_remove(handle: tauri::State<'_, QueueHandle>, id: String) -> AppResult<()> {
     handle.0.remove(&id)
+}
+
+/// d97: delete finished tracks of a playlist job (single selection or many).
+/// removes each file, its archive entry and its item record; the rest of the
+/// playlist row and its other files stay.
+#[tauri::command]
+pub fn job_item_delete(
+    handle: tauri::State<'_, QueueHandle>,
+    id: String,
+    vids: Vec<String>,
+) -> AppResult<ItemDeleteResult> {
+    handle.0.delete_items(&id, &vids)
 }
 
 /// `queueList(): Job[]` — restore on app start + polling fallback.

@@ -2,12 +2,14 @@ import { create } from "zustand";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   jobAdd,
+  jobItemDelete,
   jobRemove,
   jobRetryOptions,
   jobStop,
   queueList,
   queuePause,
   queueResume,
+  type ItemDeleteResult,
   type Job,
   type JobItem,
   type JobOptions,
@@ -82,6 +84,8 @@ interface QueueState {
   stop: (id: string) => Promise<void>;
   retry: (id: string) => Promise<void>;
   remove: (id: string) => Promise<void>;
+  /** d97: delete finished tracks from a playlist job (one or many) */
+  deleteItems: (id: string, vids: string[]) => Promise<ItemDeleteResult>;
   pause: () => Promise<void>;
   resume: () => Promise<void>;
 
@@ -179,6 +183,11 @@ export const useQueue = create<QueueState>((set, get) => ({
   remove: async (id) => {
     await jobRemove(id);
     await get().load();
+  },
+  deleteItems: async (id, vids) => {
+    const res = await jobItemDelete(id, vids);
+    await get().load();
+    return res;
   },
   pause: async () => set({ paused: await queuePause() }),
   resume: async () => set({ paused: await queueResume() }),

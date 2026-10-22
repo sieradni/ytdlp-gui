@@ -167,6 +167,14 @@ export interface JobItem {
   status: "done" | "skipped";
 }
 
+/** d97: outcome of deleting tracks from a playlist job. `remaining` is the
+ * authoritative track list after the deletion. */
+export interface ItemDeleteResult {
+  deleted: number;
+  filesRemoved: number;
+  remaining: JobItem[];
+}
+
 export interface Job {
   id: string;
   url: string;
@@ -208,6 +216,10 @@ export const jobStop = (id: string) => invoke<void>("job_stop", { id });
 export const jobRetryOptions = (id: string, options: JobOptions, destination?: string) =>
   invoke<void>("job_retry_options", { id, options, destination: destination ?? null });
 export const jobRemove = (id: string) => invoke<void>("job_remove", { id });
+/** d97: delete finished tracks (one or several) — file, archive entry and
+ * track record; the rest of the playlist job is untouched. */
+export const jobItemDelete = (id: string, vids: string[]) =>
+  invoke<ItemDeleteResult>("job_item_delete", { id, vids });
 /** D59: server-side existence probe for the re-download confirm gate
  * (renderer has no fs access; the dialog plugin opens, not probes). */
 export const fileExists = (path: string) => invoke<boolean>("file_exists", { path });

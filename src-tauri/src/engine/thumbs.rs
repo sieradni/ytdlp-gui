@@ -35,12 +35,7 @@ pub fn cache_dir() -> PathBuf {
 fn sanitize_key(key: &str) -> String {
     key.chars()
         .map(|c| if c.is_whitespace() { '_' } else { c })
-        .filter(|c| {
-            !matches!(
-                c,
-                '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|'
-            )
-        })
+        .filter(|c| !matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|'))
         .collect()
 }
 
@@ -112,7 +107,12 @@ async fn probe_thumbnail_url(
         "--print".into(),
         "%(thumbnail)s".into(),
     ];
-    if let Some(CookieSource { kind, browser, file }) = cookies {
+    if let Some(CookieSource {
+        kind,
+        browser,
+        file,
+    }) = cookies
+    {
         match kind {
             CookieKind::FromBrowser => {
                 if let Some(browser) = browser.as_deref() {
@@ -130,10 +130,9 @@ async fn probe_thumbnail_url(
         }
     }
     if let Ok(m) = crate::binaries::manager::load_manifest() {
-        if let Some(p) = crate::binaries::manager::resolve_tool_path(
-            &m,
-            crate::binaries::sources::Tool::YtDlp,
-        ) {
+        if let Some(p) =
+            crate::binaries::manager::resolve_tool_path(&m, crate::binaries::sources::Tool::YtDlp)
+        {
             argv[0] = p.to_string_lossy().into_owned();
         }
     }
@@ -471,13 +470,10 @@ async fn run_capture(exe: &Path, args: &[String]) -> Option<Vec<u8>> {
         .stderr(std::process::Stdio::null());
     crate::engine::probe::no_window(&mut cmd);
     let child = cmd.spawn().ok()?;
-    let out = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        child.wait_with_output(),
-    )
-    .await
-    .ok()?
-    .ok()?;
+    let out = tokio::time::timeout(std::time::Duration::from_secs(10), child.wait_with_output())
+        .await
+        .ok()?
+        .ok()?;
     out.status.success().then_some(out.stdout)
 }
 
@@ -573,9 +569,6 @@ mod tests {
     fn cache_path_is_inside_cache_dir() {
         let p = cache_path("youtube jNQXAC9IVRw");
         assert!(p.starts_with(cache_dir()));
-        assert!(
-            p.to_string_lossy()
-                .ends_with("youtube_jNQXAC9IVRw.png")
-        );
+        assert!(p.to_string_lossy().ends_with("youtube_jNQXAC9IVRw.png"));
     }
 }

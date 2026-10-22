@@ -36,10 +36,7 @@ pub enum ParsedLine {
     Title(String),
     /// a playlist item started: `[download] <id>: <title>` (d94: the title
     /// is carried too — job_items records name the tracks, not just ids).
-    ItemStart {
-        id: String,
-        title: Option<String>,
-    },
+    ItemStart { id: String, title: Option<String> },
     /// `__I__<index>|<effective-total>|<full-playlist-size>` from the
     /// engine's pre_process print (e2e find, 2026-09-03: the console
     /// "Downloading item N of M" line is suppressed under a download:
@@ -66,6 +63,10 @@ pub enum ParsedLine {
     /// title at item start. fires in normal runs (unlike the verbose-gated
     /// `[download] <id>: <title>` line).
     ItemTitle(String),
+    /// `__V__<id>` from the engine's per-item print (d97): the item that is
+    /// STARTING. unlike the after_move path it arrives before any bytes, so
+    /// a cancel can name — and clean up — the incomplete track.
+    ItemVid(String),
     /// `[download] <id>: <title> has already been recorded in the archive`.
     /// a skipped playlist item — counts as processed (D54). d94: the title
     /// rides along (the skip line is the ONLY per-item signal archive-
@@ -151,6 +152,15 @@ pub fn parse_line(raw: &str) -> ParsedLine {
         }
     }
 
+    // ---- engine's per-item id print: __V__<id> (d97). fires at item start,
+    //      so it names the track a cancel is about to interrupt.
+    if let Some(rest) = t.strip_prefix("__V__") {
+        let vid = rest.trim();
+        if !vid.is_empty() && vid != "NA" {
+            return ParsedLine::ItemVid(vid.to_owned());
+        }
+    }
+
     // ---- --print after_move:filepath output (bare path line) ----
     if looks_like_path(t) {
         return ParsedLine::FinalPath(t.to_owned());
@@ -203,19 +213,19 @@ pub fn parse_line(raw: &str) -> ParsedLine {
                     && id
                         .chars()
                         .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
-            if id_like && rest.contains("already been recorded in the archive") {
-                // title = everything before the "has already…" suffix
-                let title = rest
-                    .split(" has already been recorded")
-                    .next()
-                    .map(str::trim)
-                    .filter(|t| !t.is_empty())
-                    .map(str::to_owned);
-                return ParsedLine::PlaylistSkip {
-                    id: id.to_owned(),
-                    title,
-                };
-            }
+                if id_like && rest.contains("already been recorded in the archive") {
+                    // title = everything before the "has already…" suffix
+                    let title = rest
+                        .split(" has already been recorded")
+                        .next()
+                        .map(str::trim)
+                        .filter(|t| !t.is_empty())
+                        .map(str::to_owned);
+                    return ParsedLine::PlaylistSkip {
+                        id: id.to_owned(),
+                        title,
+                    };
+                }
                 // `[download] abc123: Some Title` — runtime title (D45).
                 // the charset guard keeps container lines like "Finished
                 // downloading playlist" from posing as item starts.
@@ -477,7 +487,10 @@ mod tests {
             other => panic!("wrong parse: {other:?}"),
         }
         // both NA (some sites expose neither) → falls through to Line
-        assert!(matches!(parse_line("__C__1|NA|NA|Dive"), ParsedLine::Line(_)));
+        assert!(matches!(
+            parse_line("__C__1|NA|NA|Dive"),
+            ParsedLine::Line(_)
+        ));
         // __N__ with a slashy title is a title, never a path
         match parse_line("__N__AC/DC - Back In Black") {
             ParsedLine::ItemTitle(t) => assert_eq!(t, "AC/DC - Back In Black"),
@@ -494,6 +507,12 @@ mod tests {
         }
         // NA title is not a title
         assert!(matches!(parse_line("__N__NA"), ParsedLine::Line(_)));
+        // d97: the in-flight item id — pre_process, before any bytes
+        match parse_line("__V__434286968") {
+            ParsedLine::ItemVid(v) => assert_eq!(v, "434286968"),
+            other => panic!("item id print eaten: {other:?}"),
+        }
+        assert!(matches!(parse_line("__V__NA"), ParsedLine::Line(_)));
     }
 
     #[test]
