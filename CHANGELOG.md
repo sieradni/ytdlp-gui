@@ -3,7 +3,7 @@
 user-visible changes per release. releases are tagged `v2.0.0-alpha.N` until GA;
 older tags predate this file and carry no entry (see the release assets).
 
-## unreleased
+## v2.0.0-alpha.17 — 2026-11-04
 
 ### queue rows converge on their own; queueing hands off to the row
 
