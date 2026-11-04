@@ -3,6 +3,53 @@
 user-visible changes per release. releases are tagged `v2.0.0-alpha.N` until GA;
 older tags predate this file and carry no entry (see the release assets).
 
+## unreleased
+
+### queue rows converge on their own; queueing hands off to the row
+
+- **a finished song no longer sits at "pending".** the queue row's state was
+  push-only: an event burst the webview missed while minimized or asleep (or a
+  renderer stall) left a completed download showing `queued` until the next
+  queue action happened to pull the list — which is exactly why it "fixed
+  itself" when something new was queued. rows are reconciled against the
+  engine now: every state change pulls the authoritative row, anything in
+  flight is reconciled once a second (an idle queue costs no work), and
+  returning to the window pulls immediately. a missed event costs at most a
+  second; it can no longer freeze a row.
+- **the progress cell names its phase** — `queued`, `resolving… 4s`, `42%`,
+  `processing`, `100%`, `failed`, `stopped`, `skipped`, `duplicate` — and the
+  bar is toned by it (muted = waiting, amber = working, green = done, red =
+  failed). "waiting", "processing" and "finished" used to render as the same
+  `—`, and the indeterminate pulse the design called for during the fetch
+  phase was never actually drawn.
+- **queueing empties the input immediately.** accepted urls leave the textarea
+  the moment you press queue (or enter), instead of waiting for the add
+  round-trip — which could sit inside the overwrite probe for up to 2.5 s.
+  the url's life now lives in its row, with its own state and progress; only
+  rejected lines come back to the box for fixing, and a cancelled overwrite
+  prompt or a failed add puts your text back exactly as it was.
+- the composer's "1 queued · 0 duplicates · 0 invalid" summary is gone for
+  accepted lines — the new row is the receipt. duplicates, invalid lines,
+  cancellations and failures are still reported, because the queue cannot show
+  what it never received.
+
+- **a rejected line states its reason once.** the composer printed the url
+  and the reason as one sentence, so a line whose reason echoed it read as
+  `✕ not a url — not a url (paste one link per line)`. intake reasons now
+  describe the problem (`contains spaces — paste one link per line`,
+  `not a link — it needs a domain …`) and each rejection renders the line
+  and its reason as separate fields. pinned by e2e scenario 9, which reads the
+  reasons out of the rendered rejection rows and fails if one echoes its line.
+
+- **the convergence rules are now covered by a test that runs with events off.**
+  `pnpm test` drives the queue store's merge and reconcile tick against
+  simulated backend snapshots only: a row walks queued → resolving → 12/37/71%
+  → processing → 100%/done on the tick alone, failed and stopped rows keep
+  their label and percent, and an out-of-order snapshot can neither roll the
+  bar back nor downgrade a finished row. writing it fixed a real gap: after the
+  event stream went quiet a lagging snapshot could still animate the bar
+  backwards.
+
 ## v2.0.0-alpha.16 — 2026-10-22
 
 - **the expanded row shows yt-dlp's output instead of the engine's own prints.**

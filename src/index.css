@@ -633,6 +633,44 @@ span.itemlist-check {
   height: 100%;
   background: var(--amber);
   border-radius: 3px;
+  transition: width 220ms linear;
+}
+
+/* d100: the bar carries the phase, not only a number — a queued item must
+   never look like a finished one. tone comes from the row's own state. */
+.progress[data-tone="queued"] > div {
+  background: var(--muted);
+  opacity: 0.5;
+}
+.progress[data-tone="stopped"] > div {
+  background: var(--muted);
+  opacity: 0.8;
+}
+.progress[data-tone="duplicate"] > div {
+  background: var(--muted);
+  opacity: 0.7;
+}
+.progress[data-tone="done"] > div {
+  background: var(--green);
+}
+.progress[data-tone="error"] > div {
+  background: var(--red);
+}
+
+/* nothing measurable yet (resolving the url, waiting for the first bytes):
+   a pulse, never a fake percent (d61). the global prefers-reduced-motion
+   rule collapses the animation to a static sliver. */
+.progress[data-indeterminate] > div {
+  width: 32%;
+  animation: progress-pulse 1.4s ease-in-out infinite;
+}
+@keyframes progress-pulse {
+  from {
+    transform: translateX(-110%);
+  }
+  to {
+    transform: translateX(320%);
+  }
 }
 
 /* ===== command preview (§6 live argv; C5 tiered redesign) ===== */

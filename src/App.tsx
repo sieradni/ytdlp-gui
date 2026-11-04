@@ -31,6 +31,7 @@ export default function App() {
   // event subscriptions. no ipc probe display — the engine status is real now.
   useEffect(() => {
     let unEngine: (() => void) | undefined;
+    let unQueue: (() => void)[] | undefined;
     void loadSettings();
     void useBinaries.getState().attach();
     void attachEngineCounts().then((un) => {
@@ -49,10 +50,17 @@ export default function App() {
     void useQueue
       .getState()
       .attach()
+      .then((uns) => {
+        unQueue = uns;
+      })
       .catch((e) => setQueueError(String(e)));
     void loadQueue().catch((e) => setQueueError(String(e)));
     return () => {
       unEngine?.();
+      // d100: the queue wiring owns listeners AND a reconcile timer — detach
+      // it with the effect so a remount (strict mode, page reload) can never
+      // leave two sets running.
+      unQueue?.forEach((un) => un());
     };
   }, [loadSettings, loadQueue]);
 

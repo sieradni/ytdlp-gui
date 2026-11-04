@@ -607,12 +607,31 @@ S[9] = async () => {
   const fb = await evalUntil(`(() => { const t = window.__e2e.feedbackText(); return t && t.includes("1 invalid") && t.includes(${JSON.stringify(GARBAGE)}) ? t : "pending"; })()`, { timeoutMs: 15000, everyMs: 300, label: "intake feedback (s9)" }).catch(() => null);
   details.push(`intake feedback: ${JSON.stringify(fb)}`);
   const textareaVal = await evalAsync(ws, `window.__e2e.composer()?.value ?? ''`);
-  details.push(`textarea kept the accepted intranet url, dropped garbage: ${JSON.stringify(textareaVal)}`);
+  details.push(`textarea handed the accepted url to the queue, kept the rejected line: ${JSON.stringify(textareaVal)}`);
+  // d101: a rejected line must state its reason ONCE. the regression this
+  // guards is the copy that read "not a url — not a url (paste one link per
+  // line)": the reason echoed the line. read the reasons out of the rendered
+  // rejection rows, not out of a fixture, so the assertion covers the real
+  // surfaced copy (the rust unit test for this cannot execute on this
+  // toolchain: the gnu test binary dies with STATUS_ENTRYPOINT_NOT_FOUND).
+  const surfaced = JSON.parse(
+    await evalAsync(
+      ws,
+      `JSON.stringify([...document.querySelectorAll('.card .warn')].map((w) => ({ line: (w.firstElementChild?.textContent || '').replace(/^\u2715\s*/, '').trim(), reason: (w.querySelector('.hint')?.textContent || '').trim() })))`,
+    ),
+  );
+  details.push(`surfaced rejection reasons: ${JSON.stringify(surfaced)}`);
+  const echoed = surfaced.find((r) => r.reason === r.line || r.reason.startsWith(r.line));
+  if (echoed) details.push(`reason echoes its line (d101): ${JSON.stringify(echoed)}`);
+  const reasonOk =
+    surfaced.length > 0 &&
+    surfaced.every((r) => r.reason.length > 0 && r.reason !== r.line && !r.reason.startsWith(r.line)) &&
+    surfaced.some((r) => r.reason.includes("one link per line"));
   const err = await waitJob("192.168.1.1", "error", 60000, 500);
   details.push(`intranet job state=error: ${JSON.stringify(err.error)}`);
   const fbOk = fb && fb.includes("1 invalid") && fb.includes(GARBAGE);
   const errOk = err.error && /unsupported|error|unable|no video|failed/i.test(err.error);
-  record(9, "lenient intake (D28)", !!(fbOk && errOk && textareaVal.includes("192.168.1.1") && !textareaVal.includes(GARBAGE)), details);
+  record(9, "lenient intake (D28)", !!(reasonOk && fbOk && errOk && !textareaVal.includes("192.168.1.1") && textareaVal.includes(GARBAGE)), details);
 };
 
 // 10 — soundcloud single-format audio with -f ba/b fallback
@@ -1510,7 +1529,10 @@ S[19] = async () => {
   // renders the composer's overwrite-cancelled feedback (the positive signal
   // that the queue-time gate executed)
   const ansA = await answerDialog("cancel", queueAgain);
-  const hint = await evalUntil(`(() => [...document.querySelectorAll('.card div')].some(h => h.textContent.includes('queueing cancelled')) ? 'ok' : 'pending')()`, { timeoutMs: 8000, everyMs: 300, label: "cancel feedback (s19)" }).catch(() => "timeout");
+  // d101: the cancelled copy is now "nothing queued — the file already exists
+  // (queue again to replace it)"; assert BOTH halves so the check still fails
+  // if the feedback stops rendering or loses the reason it carries.
+  const hint = await evalUntil(`(() => [...document.querySelectorAll('.card div')].some(h => h.textContent.includes('nothing queued') && h.textContent.includes('already exists')) ? 'ok' : 'pending')()`, { timeoutMs: 8000, everyMs: 300, label: "cancel feedback (s19)" }).catch(() => "timeout");
   await sleep(800);
   let after = await jobs();
   const newAfterCancel = after.filter((j) => !prior.has(j.id));

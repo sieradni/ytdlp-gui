@@ -1886,7 +1886,11 @@ fn normalize_url(raw: &str) -> NormalizeResult {
     if t.chars().any(char::is_whitespace) {
         return NormalizeResult::Invalid {
             line: t.to_owned(),
-            reason: "not a url (paste one link per line)".into(),
+            // d101: the reason must describe the PROBLEM, never restate the
+            // line — the composer already prints the rejected text beside it,
+            // so the old copy rendered as "not a url — not a url (paste one
+            // link per line)" for exactly this input.
+            reason: "contains spaces — paste one link per line".into(),
         };
     }
     if t.starts_with("http://") || t.starts_with("https://") {
@@ -1895,7 +1899,7 @@ fn normalize_url(raw: &str) -> NormalizeResult {
     if !t.contains('.') {
         return NormalizeResult::Invalid {
             line: t.to_owned(),
-            reason: "not a url".into(),
+            reason: "not a link — it needs a domain (e.g. youtube.com/watch?v=…)".into(),
         };
     }
     NormalizeResult::Ok(format!("https://{t}"))
@@ -2255,6 +2259,19 @@ mod tests {
         match normalize_url("this is not a url") {
             NormalizeResult::Invalid { reason, .. } => {
                 assert!(reason.contains("one link per line"))
+            }
+            other => panic!("wrong: {other:?}"),
+        }
+        // d101: a reason describes the problem, never restates the line —
+        // the old whitespace copy turned the canonical bad line into
+        // "not a url — not a url (paste one link per line)".
+        match normalize_url("not a url") {
+            NormalizeResult::Invalid { line, reason } => {
+                assert_ne!(reason, line, "reason must not duplicate the line");
+                assert!(
+                    !reason.starts_with(&line),
+                    "reason must not lead with the line: {reason}"
+                );
             }
             other => panic!("wrong: {other:?}"),
         }

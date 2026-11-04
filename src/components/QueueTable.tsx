@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { useQueue, type SortKey } from "../stores/queue";
 import type { Job } from "../lib/ipc";
+import { progressOf } from "../stores/queueLogic";
 import { Thumb } from "./Thumb";
 import { confirmDialog } from "./ConfirmDialog";
 
@@ -379,6 +380,7 @@ function Row({ job, index }: { job: Job; index: number }) {
   const cardIntent = useRef(false);
   const rowRef = useRef<HTMLTableRowElement>(null);
   const open = useQueue((s) => s.expanded.has(job.id));
+  const bar = progressOf(job);
   // completion feedback in-place (§6): a one-shot row flash when a job lands
   // on done — quiet enough to not demand attention, per the design language.
   const [doneFlash, setDoneFlash] = useState(false);
@@ -468,33 +470,18 @@ function Row({ job, index }: { job: Job; index: number }) {
         </td>
         <td>
           <div className="flex items-center gap-2">
-            <div className="progress" style={{ flex: 1 }}>
-              <div
-                style={{
-                  // playlist jobs: the bar tracks overall items-done, not the
-                  // current item's byte percent (D54); fetching shows an
-                  // indeterminate pulse — never a stale percent (d61)
-                  width: `${
-                    job.state === "fetching"
-                      ? 0
-                      : job.itemsTotal != null
-                        ? ((job.itemsDone ?? 0) / job.itemsTotal) * 100
-                        : (job.pct ?? 0)
-                  }%`,
-                }}
-              />
+            {/* d100: bar tone + label come from the phase (progressOf), so
+                "queued", "processing" and "100%" are visibly different
+                things instead of three shades of "—" */}
+            <div
+              className="progress"
+              style={{ flex: 1 }}
+              data-tone={bar.tone}
+              data-indeterminate={bar.indeterminate ? "" : undefined}
+            >
+              <div style={bar.pct == null ? undefined : { width: `${bar.pct}%` }} />
             </div>
-            <span className="numm">
-              {job.itemsTotal != null
-                ? `${job.itemsDone ?? 0}/${job.itemsTotal}`
-                : job.state === "fetching"
-                  ? // d61: honest liveness — the identity probe is running;
-                    // show elapsed seconds, never a fake percent
-                    `resolving… ${Math.floor((job.fetchMs ?? 0) / 1000)}s`
-                  : job.pct != null
-                    ? `${Math.round(job.pct)}%`
-                    : "—"}
-            </span>
+            <span className="numm">{bar.label}</span>
           </div>
         </td>
         <td className="numm">{fmtSpeed(job.speedBps) || "—"}</td>

@@ -44,11 +44,16 @@ export default function Composer() {
   }, [settings.destination, destTouched, dest]);
 
   const [advOpen, setAdvOpen] = useState(false);
+  // intake verdict — only the part the queue rows CANNOT show: lines it
+  // refused (with reasons), urls that were already queued, and cancellations.
+  // an accepted url is its own receipt: it appears in the queue with its own
+  // state and progress, which is where the user watches it from here on
+  // (d100 — "1 queued" was a second copy of a row that just appeared).
   const [feedback, setFeedback] = useState<{
-    queued: number;
     dupes: number;
     invalid: [string, string][];
-    overwriteCancelled?: boolean;
+    cancelled?: boolean;
+    failed?: string;
   } | null>(null);
   const [copied, setCopied] = useState(false);
 
@@ -164,7 +169,20 @@ export default function Composer() {
   };
 
   const queue = async () => {
-    const lines = urls.split(/[\n,;]+/);
+    const typed = urls;
+    const lines = typed.split(/[\n,;]+/);
+    if (!lines.some((l) => l.trim())) return; // empty composer: no-op
+    // d100 — accepted urls leave the box the instant you press queue. the
+    // textarea is INPUT, not a status surface: the item's life (queued →
+    // fetching → downloading → done) belongs to its queue row, and a second
+    // copy lingering here read as if the song were still waiting in the
+    // composer. it also stops the overwrite probe below (a cold url can spend
+    // up to 2.5 s there) from holding the user's text hostage.
+    setUrls("");
+    setFeedback(null);
+    // hand the text back only when the user hasn't started typing something
+    // new in the meantime — their keystrokes always win over a restore.
+    const restore = (text: string) => setUrls((u) => (u.trim() ? u : text));
     // d60 — same gate as history's ↻, at queue time: single-video jobs that
     // would land on an existing destination file confirm first. over-asks
     // are impossible (exact id match), under-asks only when the probe
@@ -198,7 +216,10 @@ export default function Composer() {
           cancelLabel: "cancel",
         });
         if (!ok) {
-          setFeedback({ queued: 0, dupes: 0, invalid: [], overwriteCancelled: true });
+          // nothing was queued and nothing was rejected: the text belongs
+          // back in the box, exactly as it was
+          restore(typed);
+          setFeedback({ dupes: 0, invalid: [], cancelled: true });
           return;
         }
         // per-call only: the composer's visible state (and the D19 mirror,
@@ -206,24 +227,22 @@ export default function Composer() {
         queueOpts = { ...opts, overwrite: true };
       }
     }
-    const fb = await add(lines, queueOpts, dest || undefined);
-    setFeedback({
-      queued: fb.jobs.length,
-      dupes: fb.duplicatesSkipped,
-      invalid: fb.invalid,
-    });
-    // accepted lines clear; invalid stay for fixing (§5.2)
-    if (fb.invalid.length === 0) {
-      setUrls("");
-    } else {
-      const bad = new Set(fb.invalid.map(([line]) => line.trim()));
-      setUrls((u) =>
-        u
-          .split(/[\n,;]+/)
-          .filter((l) => !bad.has(l.trim()))
-          .join("\n"),
-      );
+    let fb: Awaited<ReturnType<typeof add>>;
+    try {
+      fb = await add(lines, queueOpts, dest || undefined);
+    } catch (e) {
+      // the engine refused the whole batch — the text must not vanish with it
+      restore(typed);
+      setFeedback({ dupes: 0, invalid: [], failed: String(e) });
+      return;
     }
+    // a rejected line is the user's text to fix: it goes back in the box,
+    // never mixed with the accepted ones (§5.2). accepted items are already
+    // queue rows — the list is the acknowledgement.
+    if (fb.invalid.length > 0) {
+      restore(fb.invalid.map(([line]) => line.trim()).join("\n"));
+    }
+    setFeedback({ dupes: fb.duplicatesSkipped, invalid: fb.invalid });
   };
 
   const webmWarn = opts.dlType === "video" && opts.container === "webm";
@@ -485,6 +504,8 @@ export default function Composer() {
           </span>
         </div>
 
+        {/* d100: only the exceptions are reported here — the accepted urls
+            are already rows in the queue, with their own state and progress. */}
         {feedback && (
           <div
             style={{
@@ -495,13 +516,26 @@ export default function Composer() {
             }}
           >
             <span style={{ fontSize: 12 }}>
-              {feedback.overwriteCancelled
-                ? "queueing cancelled — file already exists (nothing queued)"
-                : `${feedback.queued} queued · ${feedback.dupes} duplicates skipped · ${feedback.invalid.length} invalid`}
+              {feedback.cancelled
+                ? "nothing queued — the file already exists (queue again to replace it)"
+                : feedback.failed
+                  ? `could not queue: ${feedback.failed}`
+                  : [
+                      feedback.dupes > 0 ? `${feedback.dupes} already in the queue` : "",
+                      feedback.invalid.length > 0 ? `${feedback.invalid.length} invalid` : "",
+                    ]
+                      .filter(Boolean)
+                      .join(" · ")}
             </span>
+            {/* d101: line and reason are two fields, not one sentence — a
+                one-sentence "✕ <line> — <reason>" can read as a stuttered
+                duplicate whenever the reason echoes the line. */}
             {feedback.invalid.map(([line, reason]) => (
               <div key={line} className="warn" style={{ overflowWrap: "anywhere" }}>
-                ✕ {line} — {reason}
+                <div>✕ {line}</div>
+                <div className="hint" style={{ paddingLeft: 12 }}>
+                  {reason}
+                </div>
               </div>
             ))}
           </div>
