@@ -459,7 +459,11 @@ function Row({ job, index }: { job: Job; index: number }) {
                 "fetching…"
               : job.title || job.url}
           </div>
-          <div className="t-meta">
+          {/* a failed row's message is ellipsized to one line by design (the
+              table stays scannable); the title carries the whole sentence so
+              the reason — and the fix, which the engine rewrites LEAD with —
+              is readable instead of truncated away. */}
+          <div className="t-meta" title={job.error ?? undefined}>
             {job.error ??
               (job.skipped ?
                 "already downloaded — skipped"

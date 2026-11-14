@@ -30,10 +30,41 @@ const PLAYLIST_HINTS: Record<PlaylistMode, string> = {
   firstn: "first n items from the start of the playlist",
 };
 
+/** the intake verdict (§5.2): what happened to the paste, in the user's terms.
+ * one shape per outcome so the surface can never render a half-filled card
+ * (`dupes: 0, invalid: [], cancelled: undefined` was a card with no story). */
+type IntakeFeedback =
+  | { kind: "pending" }
+  | { kind: "invalid"; lines: [string, string][]; dupes: number; restored: boolean }
+  | { kind: "duplicates"; dupes: number }
+  | { kind: "cancelled"; restored: boolean }
+  | { kind: "failed"; message: string; restored: boolean };
+
+/** an ipc rejection is not always a string: tauri can hand back an `Error`, a
+ * bare string, or a serde object. none of them may reach the user as
+ * "[object Object]" or "Error: Error: …". */
+function readableError(e: unknown): string {
+  let raw: unknown = e;
+  if (e instanceof Error) raw = e.message;
+  else if (e && typeof e === "object") {
+    const m = (e as { message?: unknown }).message;
+    raw = typeof m === "string" ? m : JSON.stringify(e);
+  }
+  const msg = String(raw ?? "")
+    .replace(/^Error:\s*/, "")
+    .trim();
+  return msg || "no reason given";
+}
+
 export default function Composer() {
   const { settings } = useSettings();
   const add = useQueue((s) => s.add);
   const [urls, setUrls] = useState("");
+  // did the user edit the box after submitting? a programmatic restore of the
+  // rejected lines must never overwrite new typing, and the verdict must not
+  // claim a restore that did not happen (ref, not state: restore reads it in
+  // the same tick the submission resolves).
+  const typedSince = useRef(false);
   const [dest, setDest] = useState(settings.destination ?? "");
   // settings load async — adopt the stored destination once it arrives,
   // unless the user already typed a destination this session.
@@ -49,12 +80,10 @@ export default function Composer() {
   // an accepted url is its own receipt: it appears in the queue with its own
   // state and progress, which is where the user watches it from here on
   // (d100 — "1 queued" was a second copy of a row that just appeared).
-  const [feedback, setFeedback] = useState<{
-    dupes: number;
-    invalid: [string, string][];
-    cancelled?: boolean;
-    failed?: string;
-  } | null>(null);
+  const [feedback, setFeedback] = useState<IntakeFeedback | null>(null);
+  // one submission at a time — a disabled button alone cannot stop the enter
+  // key, and a double submit would queue the same paste twice.
+  const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
 
   // d85 — the home destination is a home setting: once the user edits it
@@ -169,6 +198,9 @@ export default function Composer() {
   };
 
   const queue = async () => {
+    // enter-mashing must not queue the same paste twice while the gate or the
+    // engine round-trip is still running.
+    if (busy) return;
     const typed = urls;
     const lines = typed.split(/[\n,;]+/);
     if (!lines.some((l) => l.trim())) return; // empty composer: no-op
@@ -179,70 +211,96 @@ export default function Composer() {
     // composer. it also stops the overwrite probe below (a cold url can spend
     // up to 2.5 s there) from holding the user's text hostage.
     setUrls("");
-    setFeedback(null);
+    typedSince.current = false;
+    // the verdict is the receipt for the click and it lands in the same frame:
+    // the overwrite gate and the engine round-trip take a second or two, and
+    // silence during that window is indistinguishable from being ignored.
+    setBusy(true);
+    setFeedback({ kind: "pending" });
     // hand the text back only when the user hasn't started typing something
-    // new in the meantime — their keystrokes always win over a restore.
-    const restore = (text: string) => setUrls((u) => (u.trim() ? u : text));
-    // d60 — same gate as history's ↻, at queue time: single-video jobs that
-    // would land on an existing destination file confirm first. over-asks
-    // are impossible (exact id match), under-asks only when the probe
-    // errors (the engine surfaces that anyway). playlists are excluded —
-    // yt-dlp's --download-archive already covers their re-runs.
-    let queueOpts = opts;
-    if (opts.playlistMode === "single" && !opts.overwrite) {
-      const singles = lines.map((l) => l.trim()).filter(Boolean);
-      let targets: Awaited<ReturnType<typeof overwriteTargets>> = [];
-      try {
-        // the gate must never stall the queue click on a slow/unreachable
-        // url (yt-dlp's generic extractor waits ~20s on a connect timeout):
-        // race the probe with a bounded cap — unresolvable-in-time = queue
-        // anyway. d89: the engine's pre-spawn gate is the race-free backstop,
-        // so a miss here lands as a clear refusal row, never a silent
-        // overwrite or a silent no-op skip.
-        targets = await Promise.race([
-          overwriteTargets(singles, true, opts.skipDownloaded).catch(() => []),
-          new Promise<Awaited<ReturnType<typeof overwriteTargets>>>((r) => setTimeout(() => r([]), 2500)),
-        ]);
-      } catch {
-        targets = []; // probe unavailable → queue unguarded (engine reports)
-      }
-      if (targets.length > 0) {
-        const list = targets.map((t) => `“${t.name}”`).join("\n");
-        // m7-b: in-app confirm (chime + modal) replaces the windows task dialog
-        const ok = await confirmDialog({
-          title: "file already exists",
-          body: `${list} already exists in the destination.\n\nQueuing replaces it with a fresh download (metadata re-embedded) using the current composer settings.`,
-          confirmLabel: "overwrite",
-          cancelLabel: "cancel",
-        });
-        if (!ok) {
-          // nothing was queued and nothing was rejected: the text belongs
-          // back in the box, exactly as it was
-          restore(typed);
-          setFeedback({ dupes: 0, invalid: [], cancelled: true });
-          return;
-        }
-        // per-call only: the composer's visible state (and the D19 mirror,
-        // which must keep reflecting it) stay untouched
-        queueOpts = { ...opts, overwrite: true };
-      }
-    }
-    let fb: Awaited<ReturnType<typeof add>>;
+    // new in the meantime — their keystrokes always win over a restore. the
+    // verdict reports the real outcome (see `restored`) rather than assuming.
+    let restored = false;
+    const restore = (text: string) => {
+      if (typedSince.current) return;
+      setUrls(text);
+      restored = true;
+    };
+    let added = false;
     try {
-      fb = await add(lines, queueOpts, dest || undefined);
+      // d60 — same gate as history's ↻, at queue time: single-video jobs that
+      // would land on an existing destination file confirm first. over-asks
+      // are impossible (exact id match), under-asks only when the probe
+      // errors (the engine surfaces that anyway). playlists are excluded —
+      // yt-dlp's --download-archive already covers their re-runs.
+      let queueOpts = opts;
+      if (opts.playlistMode === "single" && !opts.overwrite) {
+        const singles = lines.map((l) => l.trim()).filter(Boolean);
+        let targets: Awaited<ReturnType<typeof overwriteTargets>> = [];
+        try {
+          // the gate must never stall the queue click on a slow/unreachable
+          // url (yt-dlp's generic extractor waits ~20s on a connect timeout):
+          // race the probe with a bounded cap — unresolvable-in-time = queue
+          // anyway. d89: the engine's pre-spawn gate is the race-free backstop,
+          // so a miss here lands as a clear refusal row, never a silent
+          // overwrite or a silent no-op skip.
+          targets = await Promise.race([
+            overwriteTargets(singles, true, opts.skipDownloaded).catch(() => []),
+            new Promise<Awaited<ReturnType<typeof overwriteTargets>>>((r) => setTimeout(() => r([]), 2500)),
+          ]);
+        } catch {
+          targets = []; // probe unavailable → queue unguarded (engine reports)
+        }
+        if (targets.length > 0) {
+          const list = targets.map((t) => `“${t.name}”`).join("\n");
+          // m7-b: in-app confirm (chime + modal) replaces the windows task dialog
+          const ok = await confirmDialog({
+            title: "file already exists",
+            body: `${list} already exists in the destination.\n\nQueuing replaces it with a fresh download (metadata re-embedded) using the current composer settings.`,
+            confirmLabel: "overwrite",
+            cancelLabel: "cancel",
+          });
+          if (!ok) {
+            // nothing was queued and nothing was rejected: the text belongs
+            // back in the box, exactly as it was
+            restore(typed);
+            setFeedback({ kind: "cancelled", restored });
+            return;
+          }
+          // per-call only: the composer's visible state (and the D19 mirror,
+          // which must keep reflecting it) stay untouched
+          queueOpts = { ...opts, overwrite: true };
+        }
+      }
+      let fb: Awaited<ReturnType<typeof add>>;
+      try {
+        fb = await add(lines, queueOpts, dest || undefined);
+        added = true;
+      } catch (e) {
+        // the engine refused the whole batch — the text must not vanish with it
+        restore(typed);
+        setFeedback({ kind: "failed", message: readableError(e), restored });
+        return;
+      }
+      // a rejected line is the user's text to fix: it goes back in the box,
+      // never mixed with the accepted ones (§5.2). accepted items are already
+      // queue rows — the list is the acknowledgement.
+      if (fb.invalid.length > 0) {
+        restore(fb.invalid.map(([line]) => line.trim()).join("\n"));
+        setFeedback({ kind: "invalid", lines: fb.invalid, dupes: fb.duplicatesSkipped, restored });
+      } else if (fb.duplicatesSkipped > 0) {
+        setFeedback({ kind: "duplicates", dupes: fb.duplicatesSkipped });
+      } else {
+        setFeedback(null); // every line became a row — the queue is the receipt
+      }
     } catch (e) {
-      // the engine refused the whole batch — the text must not vanish with it
-      restore(typed);
-      setFeedback({ dupes: 0, invalid: [], failed: String(e) });
-      return;
+      // a throw outside the add round-trip (the confirm dialog, a gate fault)
+      // still owes the user an answer and must never lose their text
+      if (!added) restore(typed);
+      setFeedback({ kind: "failed", message: readableError(e), restored });
+    } finally {
+      setBusy(false);
     }
-    // a rejected line is the user's text to fix: it goes back in the box,
-    // never mixed with the accepted ones (§5.2). accepted items are already
-    // queue rows — the list is the acknowledgement.
-    if (fb.invalid.length > 0) {
-      restore(fb.invalid.map(([line]) => line.trim()).join("\n"));
-    }
-    setFeedback({ dupes: fb.duplicatesSkipped, invalid: fb.invalid });
   };
 
   const webmWarn = opts.dlType === "video" && opts.container === "webm";
@@ -261,7 +319,15 @@ export default function Composer() {
         <textarea
           rows={2}
           value={urls}
-          onChange={(e) => setUrls(e.target.value)}
+          onChange={(e) => {
+            // typing means the rejected text is no longer what the box holds,
+            // so a verdict about the previous paste must not linger. the
+            // programmatic restore writes state directly and cannot clear its
+            // own message.
+            typedSince.current = true;
+            setUrls(e.target.value);
+            setFeedback((f) => (f && f.kind !== "pending" ? null : f));
+          }}
           onKeyDown={(e) => {
             // enter queues (§6 keyboard/ux polish); shift+enter inserts a
             // newline for multi-line pastes. IME compositions must not be
@@ -273,7 +339,14 @@ export default function Composer() {
             }
           }}
           placeholder="https://www.youtube.com/watch?v=…"
+          aria-invalid={feedback?.kind === "invalid" || feedback?.kind === "failed" ? true : undefined}
         />
+
+        {/* §5.2 verdict: directly under the textarea — the place the eye is
+            already at after enter. it used to render below every option on
+            the card, which on a short window is off-screen, so a rejected
+            paste read as silence. */}
+        {feedback && <IntakeVerdict feedback={feedback} onDismiss={() => setFeedback(null)} />}
 
         <div className="fgrid" style={{ marginTop: 10 }}>
           <label>destination</label>
@@ -483,8 +556,8 @@ export default function Composer() {
         />
 
         <div className="flex items-center gap-2" style={{ marginTop: 10 }}>
-          <button className="btn primary" onClick={queue}>
-            queue downloads
+          <button className="btn primary" onClick={queue} disabled={busy}>
+            {busy ? "queueing…" : "queue downloads"}
           </button>
           <button
             className="btn ghost"
@@ -503,43 +576,6 @@ export default function Composer() {
             {urlCount} {urlCount === 1 ? "url" : "urls"}
           </span>
         </div>
-
-        {/* d100: only the exceptions are reported here — the accepted urls
-            are already rows in the queue, with their own state and progress. */}
-        {feedback && (
-          <div
-            style={{
-              marginTop: 8,
-              border: "1px solid var(--amber-border)",
-              borderRadius: 4,
-              padding: "8px 10px",
-            }}
-          >
-            <span style={{ fontSize: 12 }}>
-              {feedback.cancelled
-                ? "nothing queued — the file already exists (queue again to replace it)"
-                : feedback.failed
-                  ? `could not queue: ${feedback.failed}`
-                  : [
-                      feedback.dupes > 0 ? `${feedback.dupes} already in the queue` : "",
-                      feedback.invalid.length > 0 ? `${feedback.invalid.length} invalid` : "",
-                    ]
-                      .filter(Boolean)
-                      .join(" · ")}
-            </span>
-            {/* d101: line and reason are two fields, not one sentence — a
-                one-sentence "✕ <line> — <reason>" can read as a stuttered
-                duplicate whenever the reason echoes the line. */}
-            {feedback.invalid.map(([line, reason]) => (
-              <div key={line} className="warn" style={{ overflowWrap: "anywhere" }}>
-                <div>✕ {line}</div>
-                <div className="hint" style={{ paddingLeft: 12 }}>
-                  {reason}
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
 
         {advOpen && (
           <>
@@ -667,6 +703,104 @@ export default function Composer() {
             </div>
           </>
         )}
+      </div>
+    </div>
+  );
+}
+
+/** §5.2's rejection surface. one card per outcome, and every card says what
+ * happened AND what to do next — an error the user cannot act on is a dead
+ * end, and an error that is not where the user is looking is not an error at
+ * all. live region: screen readers announce it the moment it lands. */
+function IntakeVerdict({ feedback, onDismiss }: { feedback: IntakeFeedback; onDismiss: () => void }) {
+  if (feedback.kind === "pending") {
+    return (
+      <div className="intake" data-tone="pending" role="status" aria-live="polite">
+        checking the link…
+      </div>
+    );
+  }
+  const close = (
+    <button className="intake-x" onClick={onDismiss} title="dismiss" aria-label="dismiss">
+      ✕
+    </button>
+  );
+  const head = (title: string) => (
+    <div className="intake-head">
+      <span className="intake-title">{title}</span>
+      <span className="grow" />
+      {close}
+    </div>
+  );
+
+  if (feedback.kind === "duplicates") {
+    return (
+      <div className="intake" data-tone="notice" role="status">
+        {head(
+          feedback.dupes === 1
+            ? "already in the queue"
+            : `all ${feedback.dupes} are already in the queue`,
+        )}
+        <div className="intake-next">nothing new was added</div>
+      </div>
+    );
+  }
+  if (feedback.kind === "cancelled") {
+    return (
+      <div className="intake" data-tone="notice" role="status">
+        {head("nothing queued")}
+        <div className="intake-next">
+          the file already exists — press queue downloads again to replace it
+        </div>
+      </div>
+    );
+  }
+  if (feedback.kind === "failed") {
+    return (
+      <div className="intake" role="alert">
+        {head("couldn't queue")}
+        <div className="intake-line">{feedback.message}</div>
+        <div className="intake-next">
+          {feedback.restored
+            ? "your text is back in the box — nothing was lost"
+            : "the text you typed since was kept — nothing was lost"}
+        </div>
+      </div>
+    );
+  }
+  // invalid: the line could not become a row. the reason is the engine's own
+  // words (d101 keeps line and reason as separate fields so a reason that
+  // echoes the line cannot read as a stutter).
+  const n = feedback.lines.length;
+  return (
+    <div className="intake" role="alert">
+      <div className="intake-head">
+        <span className="intake-title">
+          {n === 1 ? "1 line couldn't be queued" : `${n} lines couldn't be queued`}
+        </span>
+        {feedback.dupes > 0 && (
+          <span className="intake-sub">
+            {feedback.dupes === 1 ? "1 other was already queued" : `${feedback.dupes} others were already queued`}
+          </span>
+        )}
+        <span className="grow" />
+        {close}
+      </div>
+      {feedback.lines.map(([line, reason]) => (
+        <div key={line} className="intake-line">
+          <div className="intake-src">
+            <span className="intake-mark" aria-hidden="true">
+              ✕
+            </span>{" "}
+            {line}
+          </div>
+          <div className="intake-reason">{reason}</div>
+        </div>
+      ))}
+      <div className="intake-next">
+        {feedback.restored
+          ? "the rejected line is back in the box — fix it and press enter again"
+          : "the text you typed since was kept — the rejected line was not restored"}
       </div>
     </div>
   );

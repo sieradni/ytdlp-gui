@@ -673,6 +673,80 @@ span.itemlist-check {
   }
 }
 
+/* ===== intake verdict (§5.2) =====
+ * the composer's answer to "why did nothing happen". it sits directly under
+ * the textarea — the old surface rendered at the bottom of the card, below
+ * every option, which on a short window is off-screen and reads as silence.
+ * red = the line was refused, amber = nothing to do, muted = still checking. */
+.intake {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--red);
+  border-left-width: 3px;
+  border-radius: var(--radius);
+  background: var(--red-soft);
+  font-size: 12px;
+}
+.intake[data-tone="notice"] {
+  border-color: var(--amber-border);
+  border-left-color: var(--amber);
+  background: var(--amber-soft);
+}
+.intake[data-tone="pending"] {
+  border-color: var(--border);
+  border-left-color: var(--muted);
+  background: var(--bg-2);
+  color: var(--muted);
+}
+.intake-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.intake-title {
+  font-weight: 700;
+}
+.intake-sub {
+  color: var(--muted);
+  font-size: 11.5px;
+}
+.intake-line {
+  margin-top: 6px;
+  overflow-wrap: anywhere;
+}
+.intake-mark {
+  color: var(--red);
+  font-weight: 700;
+}
+.intake-reason {
+  color: var(--muted);
+  font-size: 11.5px;
+  padding-left: 12px;
+}
+.intake-next {
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.intake-x {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 3px;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1;
+}
+.intake-x:hover {
+  background: var(--bg-3);
+  color: var(--text);
+}
+
 /* ===== command preview (§6 live argv; C5 tiered redesign) ===== */
 .cmdprev {
   display: flex;
