@@ -851,12 +851,25 @@ main.scrollpane::-webkit-scrollbar-thumb {
 }
 
 /* ===== reduced motion (M6 polish; cheap to respect now) ===== */
+/* shortening a duration is not the same as stopping a loop: with `infinite`
+   still on, the resolving pulse restarted every 0.01ms — ~100,000 sweeps a
+   second, measured live in the app — which read as a fast, erratic streak
+   pinned at the bar's left edge instead of the 1.4s sweep it is designed to
+   be. the iteration count ends such loops, and the pulse is held at the
+   midpoint of its own sweep so the phase stays readable as a still sliver
+   (end of a 0.01ms iteration is a moving target, not a position). */
 @media (prefers-reduced-motion: reduce) {
+  .progress[data-indeterminate] > div {
+    animation: none;
+    /* (track − 32% sliver) / 2, in the sliver's own width: dead centre */
+    transform: translateX(106.25%);
+  }
   *,
   *::before,
   *::after {
     transition-duration: 0.01ms !important;
     animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
   }
 }
 
