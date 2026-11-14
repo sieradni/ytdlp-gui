@@ -3,6 +3,34 @@
 user-visible changes per release. releases are tagged `v2.0.0-alpha.N` until GA;
 older tags predate this file and carry no entry (see the release assets).
 
+## v2.0.0-alpha.18 — 2026-11-14
+
+### the composer says why a paste did nothing, where you are looking
+
+- **a rejected link is answered in the same frame, under the box.** the
+  verdict used to render at the bottom of the card, below every option —
+  off-screen on a short window — and only after the overwrite probe finished:
+  a measured 1.9 s of silence that read as being ignored. enter or queue now
+  shows `checking the link…` immediately with the button disabled, and the
+  answer lands directly under the textarea — a red card naming each refused
+  line with the engine's reason and what to do next, an amber notice for
+  duplicates and cancelled overwrites, muted while checking. it is a live
+  region (`role="alert"`), so it is announced; typing clears it; it can be
+  dismissed.
+- **the rejected text comes back without stealing your next paste.** the
+  restore never overwrites text typed while the answer was in flight, and the
+  verdict says which of the two happened instead of assuming. enter-mashing
+  can no longer queue the same paste twice.
+- **a failed download's full reason is readable.** queue rows keep their
+  one-line layout, but the message carries the whole sentence on hover
+  instead of being ellipsized away.
+- **the resolving pulse is still under reduced motion.** with windows
+  "animation effects" off (which reports `prefers-reduced-motion: reduce`) the
+  pulse kept its `infinite` iteration at a 0.01 ms duration — ~100,000 sweeps
+  a second, measured live, which rendered as a streak pinned at the bar's left
+  edge instead of the designed 1.4 s sweep. the loop now ends and the sliver
+  is held at the midpoint of its sweep.
+
 ## v2.0.0-alpha.17 — 2026-11-04
 
 ### queue rows converge on their own; queueing hands off to the row
